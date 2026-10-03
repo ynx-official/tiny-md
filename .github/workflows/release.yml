@@ -1,0 +1,129 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_BUILD_JOBS: 2
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
+
+jobs:
+  build:
+    name: Build macOS (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            arch: arm64
+          - runner: macos-15-intel
+            arch: x86_64
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Read version from tag
+        id: version
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          version="${RELEASE_TAG#v}"
+          if [[ ! "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+            echo "Expected a version tag such as v0.1.0 or v0.1.0-beta.1" >&2
+            exit 1
+          fi
+          core="${version%%[-+]*}"
+          printf 'version=%s\ncore=%s\n' "$version" "$core" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Rust
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt --component clippy
+          rustup default stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+        with:
+          key: release-${{ matrix.arch }}
+
+      - name: Check formatting, tests and Clippy
+        run: sh scripts/check.sh
+
+      - name: Build release application
+        env:
+          BUNDLE_VERSION: ${{ steps.version.outputs.core }}
+        run: sh scripts/bundle-macos.sh --release --version "$BUNDLE_VERSION"
+
+      - name: Package and verify application
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+          RELEASE_ARCH: ${{ matrix.arch }}
+        run: |
+          bundle="target/release/Tiny MD.app"
+          plutil -lint "$bundle/Contents/Info.plist"
+          test -x "$bundle/Contents/MacOS/tiny-md"
+          lipo -verify_arch "$RELEASE_ARCH" "$bundle/Contents/MacOS/tiny-md"
+          mkdir -p target/release-assets
+          ditto -c -k --sequesterRsrc --keepParent "$bundle" "target/release-assets/tiny-md-v${RELEASE_VERSION}-macos-${RELEASE_ARCH}.zip"
+
+      - name: Upload build archive
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: macos-${{ matrix.arch }}
+          path: target/release-assets/*.zip
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Download build archives
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          pattern: macos-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Generate checksums
+        working-directory: release-assets
+        run: |
+          test "$(find . -maxdepth 1 -name '*.zip' | wc -l)" -eq 2
+          sha256sum ./*.zip > SHA256SUMS
+          sha256sum --check SHA256SUMS
+
+      - name: Create release and upload assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" release-assets/*.zip release-assets/SHA256SUMS --clobber
+          else
+            flags=()
+            if [[ "${RELEASE_TAG%%+*}" == *-* ]]; then
+              flags+=(--prerelease)
+            fi
+            gh release create "$RELEASE_TAG" release-assets/*.zip release-assets/SHA256SUMS \
+              --verify-tag --title "Tiny MD $RELEASE_TAG" --generate-notes "${flags[@]}"
+          fi
