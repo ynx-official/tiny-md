@@ -78,7 +78,14 @@ impl TinyMd {
                                 }
                             }
                         }
-                        this.show_sidebar(SidebarMode::Documents, cx);
+                        this.show_sidebar(
+                            if this.sidebar_mode == SidebarMode::Tree {
+                                SidebarMode::Tree
+                            } else {
+                                SidebarMode::Documents
+                            },
+                            cx,
+                        );
                         this.refresh_documents(cx);
                     }
                     Ok(Ok(None)) => {}
@@ -201,6 +208,11 @@ impl TinyMd {
             let query = self.library_query.read(cx).value();
             let mut entries = self.documents.clone();
             if let Some(path) = self.document.path()
+                && (!tree
+                    || self
+                        .library_root
+                        .as_ref()
+                        .is_none_or(|root| path.starts_with(root)))
                 && !entries.iter().any(|entry| entry.path == path)
             {
                 entries.insert(
@@ -209,6 +221,16 @@ impl TinyMd {
                         path: path.to_owned(),
                         preview: library::summary(&self.editor.read(cx).text()),
                         is_dir: false,
+                    },
+                );
+            }
+            if tree && let Some(root) = &self.library_root {
+                entries.insert(
+                    0,
+                    library::Entry {
+                        path: root.clone(),
+                        preview: String::new(),
+                        is_dir: true,
                     },
                 );
             }
@@ -278,11 +300,11 @@ impl TinyMd {
                     .library_root
                     .as_ref()
                     .and_then(|root| path.strip_prefix(root).ok())
-                    .map(|relative| relative.components().count().saturating_sub(1))
+                    .map(|relative| relative.components().count())
                     .unwrap_or(0);
                 let title = path
                     .file_name()
-                    .unwrap_or_default()
+                    .unwrap_or(path.as_os_str())
                     .to_string_lossy()
                     .into_owned();
                 let click_path = path.clone();
@@ -292,7 +314,7 @@ impl TinyMd {
                     .px_4()
                     .py_3()
                     .w_full()
-                    .when(tree, |row| row.py_2().pl(px(16.0 + depth as f32 * 14.0)))
+                    .when(tree, |row| row.py_2().pl(px(10.0 + depth as f32 * 16.0)))
                     .when(active, |row| row.bg(selected))
                     .cursor_pointer()
                     .hover(|style| style.bg(selected))
@@ -307,24 +329,47 @@ impl TinyMd {
                         div()
                             .flex()
                             .items_center()
-                            .gap_1()
+                            .gap(px(5.0))
+                            .when(tree && !directory, |row| {
+                                row.child(div().w(px(12.0)).flex_shrink_0())
+                            })
                             .when(directory, |row| {
-                                row.child(div().text_color(muted).child(
-                                    if self.collapsed_folders.contains(&path)
-                                        && query.trim().is_empty()
-                                    {
-                                        "▸"
-                                    } else {
-                                        "▾"
-                                    },
-                                ))
+                                row.child(
+                                    Icon::new(
+                                        if self.collapsed_folders.contains(&path)
+                                            && query.trim().is_empty()
+                                        {
+                                            IconName::ChevronRight
+                                        } else {
+                                            IconName::ChevronDown
+                                        },
+                                    )
+                                    .size(px(12.0))
+                                    .text_color(muted),
+                                )
+                            })
+                            .when(tree, |row| {
+                                row.child(
+                                    Icon::default()
+                                        .path(if directory {
+                                            "icons/folder.svg"
+                                        } else {
+                                            "sidebar/file.svg"
+                                        })
+                                        .size(px(16.0))
+                                        .text_color(if directory { muted } else { ink }),
+                                )
                             })
                             .child(
                                 div()
                                     .flex_1()
                                     .min_w_0()
                                     .text_sm()
-                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .font_weight(if tree {
+                                        FontWeight::NORMAL
+                                    } else {
+                                        FontWeight::SEMIBOLD
+                                    })
                                     .text_color(ink)
                                     .text_ellipsis()
                                     .child(title),
@@ -434,18 +479,53 @@ impl TinyMd {
                         .px_3()
                         .py_2()
                         .flex()
+                        .items_center()
                         .justify_between()
                         .child(
                             Button::new("open-folder")
-                                .label("打开文件夹…")
+                                .when(self.sidebar_mode == SidebarMode::Tree, |button| {
+                                    button.icon(IconName::Folder).tooltip("打开文件夹…")
+                                })
+                                .when(self.sidebar_mode != SidebarMode::Tree, |button| {
+                                    button.label("打开文件夹…")
+                                })
                                 .small()
                                 .ghost()
                                 .tab_stop(false)
                                 .on_click(cx.listener(|this, _, w, cx| this.open_folder(w, cx))),
                         )
+                        .when(self.sidebar_mode == SidebarMode::Tree, |footer| {
+                            footer.child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .text_center()
+                                    .text_sm()
+                                    .text_color(muted)
+                                    .text_ellipsis()
+                                    .child(
+                                        self.library_root
+                                            .as_ref()
+                                            .map(|root| {
+                                                root.file_name()
+                                                    .unwrap_or(root.as_os_str())
+                                                    .to_string_lossy()
+                                                    .into_owned()
+                                            })
+                                            .unwrap_or_else(|| "最近文档".into()),
+                                    ),
+                            )
+                        })
                         .child(
                             Button::new("refresh-documents")
-                                .label("刷新")
+                                .when(self.sidebar_mode == SidebarMode::Tree, |button| {
+                                    button
+                                        .icon(Icon::default().path("sidebar/refresh.svg"))
+                                        .tooltip("刷新")
+                                })
+                                .when(self.sidebar_mode != SidebarMode::Tree, |button| {
+                                    button.label("刷新")
+                                })
                                 .small()
                                 .ghost()
                                 .tab_stop(false)

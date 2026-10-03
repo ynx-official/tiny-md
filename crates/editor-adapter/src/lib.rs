@@ -1,7 +1,8 @@
 //! Guise-based editor integration for tiny-md.
 //!
 //! The editor view is a small, attributed fork. Its model, Markdown parsing,
-//! source mapping, theme, and highlighting remain supplied by Guise.
+//! source mapping and theme remain supplied by Guise; code highlighting uses
+//! Syntect grammars with Guise's theme palette.
 mod chord;
 mod code_blocks;
 mod commands;
@@ -9,6 +10,7 @@ mod diagrams;
 mod editmenu;
 mod ime;
 mod markdown_editor;
+mod syntax;
 mod tables;
 mod unicode;
 

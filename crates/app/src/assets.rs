@@ -7,6 +7,14 @@ impl AssetSource for Assets {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
         let strokes = match path {
             "icons/chevron-down.svg" => "<path d='m6 9 6 6 6-6'/>",
+            "icons/chevron-right.svg" => "<path d='m9 6 6 6-6 6'/>",
+            "icons/folder.svg" => {
+                "<path fill='black' stroke='none' d='M3 4h6l2 2h10a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z'/>"
+            }
+            "sidebar/file.svg" => "<path d='M14 3H5v18h14V8zM14 3v5h5M8 12h8M8 15h8M8 18h5'/>",
+            "sidebar/refresh.svg" => {
+                "<path d='M20 7v5h-5M4 17v-5h5M6 7a7 7 0 0 1 12-1l2 6M18 17a7 7 0 0 1-12 1l-2-6'/>"
+            }
             "icons/check.svg" => "<path d='m4 12 5 5 11-11'/>",
             "icons/close.svg" => "<path d='m6 6 12 12M6 18 18 6'/>",
             "icons/copy.svg" => {

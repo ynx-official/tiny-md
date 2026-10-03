@@ -17,11 +17,10 @@ env:
   CARGO_BUILD_JOBS: 2
   CARGO_PROFILE_DEV_DEBUG: 0
   CARGO_PROFILE_TEST_DEBUG: 0
-  CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: -C target-feature=+crt-static
 
 jobs:
   build:
-    name: Build ${{ matrix.platform }} (${{ matrix.arch }})
+    name: Build macOS (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 120
     strategy:
@@ -29,11 +28,9 @@ jobs:
       matrix:
         include:
           - runner: macos-15
-            platform: macos
             arch: arm64
-          - runner: windows-2022
-            platform: windows
-            arch: x64
+          - runner: macos-15-intel
+            arch: x86_64
     steps:
       - name: Check out tagged source
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -44,7 +41,6 @@ jobs:
         id: version
         env:
           RELEASE_TAG: ${{ github.ref_name }}
-        shell: bash
         run: |
           version="${RELEASE_TAG#v}"
           if [[ ! "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
@@ -55,57 +51,24 @@ jobs:
           printf 'version=%s\ncore=%s\n' "$version" "$core" >> "$GITHUB_OUTPUT"
 
       - name: Set up Rust
-        shell: bash
         run: |
           rustup toolchain install stable --profile minimal --component rustfmt --component clippy
           rustup default stable
 
-      - name: Set up Windows x64 compiler
-        if: matrix.platform == 'windows'
-        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1
-        with:
-          arch: x64
-
-      - name: Locate Windows shader compiler
-        if: matrix.platform == 'windows'
-        shell: pwsh
-        run: |
-          $sdk = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10\bin'
-          $fxc = Get-ChildItem "$sdk\*\x64\fxc.exe" |
-            Sort-Object { [version]$_.Directory.Parent.Name } -Descending |
-            Select-Object -First 1
-          if (!$fxc) { throw 'Windows SDK fxc.exe was not found' }
-          "GPUI_FXC_PATH=$($fxc.FullName)" >> $env:GITHUB_ENV
-          Get-Command cl.exe, rc.exe, link.exe
-
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
         with:
-          key: release-${{ matrix.platform }}-${{ matrix.arch }}
+          key: release-${{ matrix.arch }}
 
       - name: Check formatting, tests and Clippy
-        if: matrix.platform == 'macos'
         run: sh scripts/check.sh
 
-      - name: Check Windows formatting, tests and Clippy
-        if: matrix.platform == 'windows'
-        shell: pwsh
-        run: |
-          cargo fmt --all -- --check
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo test --locked --workspace --target x86_64-pc-windows-msvc
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo clippy --locked --workspace --all-targets --target x86_64-pc-windows-msvc -- -D warnings
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-      - name: Build macOS release application
-        if: matrix.platform == 'macos'
+      - name: Build release application
         env:
           BUNDLE_VERSION: ${{ steps.version.outputs.core }}
         run: sh scripts/bundle-macos.sh --release --version "$BUNDLE_VERSION"
 
-      - name: Package and verify macOS application
-        if: matrix.platform == 'macos'
+      - name: Package and verify application
         env:
           RELEASE_VERSION: ${{ steps.version.outputs.version }}
           RELEASE_ARCH: ${{ matrix.arch }}
@@ -114,22 +77,14 @@ jobs:
           plutil -lint "$bundle/Contents/Info.plist"
           test -x "$bundle/Contents/MacOS/tiny-md"
           lipo -verify_arch "$RELEASE_ARCH" "$bundle/Contents/MacOS/tiny-md"
-          sh scripts/package-macos.sh "$RELEASE_VERSION" "$bundle"
+          mkdir -p target/release-assets
+          ditto -c -k --sequesterRsrc --keepParent "$bundle" "target/release-assets/tiny-md-v${RELEASE_VERSION}-macos-${RELEASE_ARCH}.zip"
 
-      - name: Build and package Windows x64 application
-        if: matrix.platform == 'windows'
-        shell: pwsh
-        env:
-          RELEASE_VERSION: ${{ steps.version.outputs.version }}
-        run: ./scripts/bundle-windows.ps1 -Version $env:RELEASE_VERSION
-
-      - name: Upload installer
+      - name: Upload build archive
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: release-${{ matrix.platform }}-${{ matrix.arch }}
-          path: |
-            target/release-assets/*.dmg
-            target/release-assets/*.exe
+          name: macos-${{ matrix.arch }}
+          path: target/release-assets/*.zip
           if-no-files-found: error
           compression-level: 0
           retention-days: 14
@@ -142,19 +97,18 @@ jobs:
     permissions:
       contents: write
     steps:
-      - name: Download installers
+      - name: Download build archives
         uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
-          pattern: release-*
+          pattern: macos-*
           path: release-assets
           merge-multiple: true
 
       - name: Generate checksums
         working-directory: release-assets
         run: |
-          test "$(find . -maxdepth 1 -name '*.dmg' | wc -l)" -eq 1
-          test "$(find . -maxdepth 1 -name '*.exe' | wc -l)" -eq 1
-          sha256sum ./*.dmg ./*.exe > SHA256SUMS
+          test "$(find . -maxdepth 1 -name '*.zip' | wc -l)" -eq 2
+          sha256sum ./*.zip > SHA256SUMS
           sha256sum --check SHA256SUMS
 
       - name: Create release and upload assets
@@ -164,12 +118,12 @@ jobs:
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            gh release upload "$RELEASE_TAG" release-assets/*.dmg release-assets/*.exe release-assets/SHA256SUMS --clobber
+            gh release upload "$RELEASE_TAG" release-assets/*.zip release-assets/SHA256SUMS --clobber
           else
             flags=()
             if [[ "${RELEASE_TAG%%+*}" == *-* ]]; then
               flags+=(--prerelease)
             fi
-            gh release create "$RELEASE_TAG" release-assets/*.dmg release-assets/*.exe release-assets/SHA256SUMS \
+            gh release create "$RELEASE_TAG" release-assets/*.zip release-assets/SHA256SUMS \
               --verify-tag --title "Tiny MD $RELEASE_TAG" --generate-notes "${flags[@]}"
           fi

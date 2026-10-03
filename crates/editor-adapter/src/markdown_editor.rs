@@ -24,9 +24,10 @@
 
 use crate::chord::Chord;
 use crate::code_blocks;
-use crate::diagrams::{self, DiagramKey, DiagramState};
+use crate::diagrams::{self, DiagramKey, DiagramState, DiagramView};
 use crate::editmenu::{self, EditMenu};
 use crate::ime::{self, ImeState};
+use crate::syntax;
 use crate::tables::{self, Alignment};
 use gpui::prelude::*;
 use gpui::{
@@ -39,7 +40,7 @@ use gpui::{
 use guise::actions;
 use guise::overlay::ContextMenu;
 
-use guise::editor::{EditorModel, Highlighter, Language, LineState, Pos, TokenKind, token_color};
+use guise::editor::{EditorModel, Highlighter, LineState, Pos, TokenKind, token_color};
 use guise::markdown::block::{Block, DocState, classify};
 use guise::markdown::layout::{
     RowKind, RowPlan, byte_for_col, col_for_byte, metrics, plan, src_for_vis, vis_for_src,
@@ -432,6 +433,8 @@ pub struct MarkdownEditor {
     /// Sticky x (content space) for visual-row vertical movement.
     goal_x: Option<f32>,
     diagrams: std::collections::HashMap<DiagramKey, DiagramState>,
+    diagram_views: std::collections::HashMap<usize, DiagramView>,
+    code_highlights: syntax::Cache,
     copied_block: Option<usize>,
 }
 
@@ -467,6 +470,8 @@ impl MarkdownEditor {
             scroll_to_cursor: false,
             goal_x: None,
             diagrams: std::collections::HashMap::new(),
+            diagram_views: std::collections::HashMap::new(),
+            code_highlights: syntax::Cache::default(),
             copied_block: None,
         }
     }
@@ -567,6 +572,7 @@ impl MarkdownEditor {
     pub fn set_text(&mut self, value: &str, cx: &mut Context<Self>) {
         self.copied_block = None;
         self.diagrams.clear();
+        self.diagram_views.clear();
         self.ime.reset();
         self.model.set_text(value);
         self.normalize_heading_cursor();
@@ -1585,6 +1591,7 @@ impl Render for MarkdownEditor {
         } else {
             code_blocks::collect(self.model.lines())
         };
+        self.code_highlights.update(&blocks);
         let keys = blocks
             .iter()
             .map(|block| {
@@ -1594,6 +1601,14 @@ impl Render for MarkdownEditor {
                 })
             })
             .collect::<Vec<_>>();
+        self.diagram_views.retain(|line, _| {
+            blocks
+                .iter()
+                .any(|block| block.start == *line && block.is_mermaid())
+        });
+        for block in blocks.iter().filter(|block| block.is_mermaid()) {
+            self.diagram_views.entry(block.start).or_default();
+        }
         // Dropping obsolete pending tasks cancels their debounce/work; stale results
         // cannot replace a newer source or the other theme's preview.
         self.diagrams
@@ -1648,10 +1663,12 @@ impl Render for MarkdownEditor {
             .collect::<Vec<_>>();
         let preview_heights = keys
             .iter()
+            .enumerate()
             .map(
-                |key| match key.as_ref().and_then(|key| self.diagrams.get(key)) {
+                |(index, key)| match key.as_ref().and_then(|key| self.diagrams.get(key)) {
                     Some(DiagramState::Ready(diagram)) => {
-                        diagram.display_size(wrap_total - 32.0).1 + 44.0
+                        let zoom = self.diagram_views[&blocks[index].start].zoom;
+                        diagram.viewport_height(wrap_total - 32.0 - diagrams::PREVIEW_PADDING, zoom)
                     }
                     Some(DiagramState::Error(_)) => 96.0,
                     Some(DiagramState::Loading { .. }) => 72.0,
@@ -1744,9 +1761,15 @@ impl Render for MarkdownEditor {
             let wrap = (wrap_total - inset - right_pad).max(60.0);
 
             let runs = if let RowKind::Code { lang } = &plan.kind {
-                let language = fence_language(lang.as_deref());
-                let tokens = language.line(&plan.visible, &mut hl_state);
-                cover(plan.visible.len(), &tokens)
+                let fallback;
+                let tokens = if let Some(block) = code_block {
+                    self.code_highlights.line(block.start, i - block.start - 1)
+                } else {
+                    fallback =
+                        syntax::fence_language(lang.as_deref()).line(&plan.visible, &mut hl_state);
+                    &fallback
+                };
+                cover(plan.visible.len(), tokens)
                     .into_iter()
                     .map(|(len, kind)| TextRun {
                         len,
@@ -2044,6 +2067,39 @@ impl Render for MarkdownEditor {
                     };
                     let source = block.source.clone();
                     let edit_line = (block.start + 1).min(block.end);
+                    let mut diagram_controls = div().flex().items_center().gap(px(8.0));
+                    if let Some(DiagramState::Ready(diagram)) =
+                        keys[index].as_ref().and_then(|key| self.diagrams.get(key))
+                    {
+                        let zoom = self.diagram_views[&block.start].zoom;
+                        let scale = diagram
+                            .display_scale(wrap_total - 32.0 - diagrams::PREVIEW_PADDING, zoom);
+                        for (id, label, next_zoom) in [
+                            ("diagram-zoom-out", "−", Some(scale / 1.25)),
+                            ("diagram-zoom-in", "+", Some(scale * 1.25)),
+                            ("diagram-actual-size", "原始", Some(1.0)),
+                            ("diagram-fit-width", "适宽", None),
+                        ] {
+                            diagram_controls = diagram_controls.child(
+                                div()
+                                    .id((id, i))
+                                    .px(px(4.0))
+                                    .cursor_pointer()
+                                    .child(label)
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(move |this, _, _, cx| {
+                                            cx.stop_propagation();
+                                            if let Some(view) = this.diagram_views.get_mut(&i) {
+                                                view.set_zoom(next_zoom);
+                                                cx.notify();
+                                            }
+                                        }),
+                                    ),
+                            );
+                        }
+                        diagram_controls = diagram_controls.child(format!("{:.0}%", scale * 100.0));
+                    }
                     el = el.child(
                         div()
                             .absolute()
@@ -2063,7 +2119,9 @@ impl Render for MarkdownEditor {
                             .child(
                                 div()
                                     .flex()
+                                    .items_center()
                                     .gap(px(12.0))
+                                    .child(diagram_controls)
                                     .when(block.is_mermaid() && !self.read_only, |el| {
                                         el.child(
                                             div()
@@ -2157,10 +2215,75 @@ impl Render for MarkdownEditor {
                         );
                     match keys[index].as_ref().and_then(|key| self.diagrams.get(key)) {
                         Some(DiagramState::Ready(diagram)) => {
-                            let (width, height) = diagram.display_size(wrap_total - 32.0);
+                            let view = &self.diagram_views[&block.start];
+                            let available = wrap_total - 32.0;
+                            let (width, height) = diagram
+                                .display_size(available - diagrams::PREVIEW_PADDING, view.zoom);
+                            let viewport_height = diagram
+                                .viewport_height(available - diagrams::PREVIEW_PADDING, view.zoom);
                             preview = preview
-                                .child(img(diagram.image.clone()).w(px(width)).h(px(height)))
-                                .child(div().mt(px(8.0)).child("点击流程图编辑源码"));
+                                .child(
+                                    div()
+                                        .id(("diagram-container", block.start))
+                                        .relative()
+                                        .w_full()
+                                        .h(px(viewport_height))
+                                        .flex_shrink_0()
+                                        // Vertical scrolling belongs to the document;
+                                        // horizontal gestures only move the wide diagram.
+                                        .on_scroll_wheel(|event, _, cx| {
+                                            let delta = event.delta.pixel_delta(px(1.0));
+                                            if delta.x.abs() > delta.y.abs() {
+                                                cx.stop_propagation();
+                                            }
+                                        })
+                                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                        .child(
+                                            div()
+                                                .id(("diagram-viewport", block.start))
+                                                .size_full()
+                                                .overflow_x_scroll()
+                                                .map(|mut el| {
+                                                    el.style().restrict_scroll_to_axis = Some(true);
+                                                    el
+                                                })
+                                                .track_scroll(&view.scroll)
+                                                .child(
+                                                    div()
+                                                        .flex()
+                                                        .items_center()
+                                                        .justify_center()
+                                                        .w(px((width + diagrams::PREVIEW_PADDING)
+                                                            .max(available)))
+                                                        .h(px(height + diagrams::PREVIEW_PADDING))
+                                                        .child(
+                                                            img(diagram.image.clone())
+                                                                .flex_shrink_0()
+                                                                .w(px(width))
+                                                                .h(px(height))
+                                                                .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, window, cx| {
+                                                                    cx.stop_propagation();
+                                                                    if !this.read_only {
+                                                                        this.finish_composition(cx);
+                                                                        this.model.move_to(edit_line, 0, false);
+                                                                        window.focus(&this.focus);
+                                                                        cx.notify();
+                                                                    }
+                                                                })),
+                                                        ),
+                                                ),
+                                        )
+                                        .child(
+                                            div()
+                                                .absolute()
+                                                .left_0()
+                                                .right_0()
+                                                .bottom_0()
+                                                .h(px(10.0))
+                                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                                .child(guise::Scrollbar::new(("diagram-scroll-x", block.start), &view.scroll).horizontal(true)),
+                                        ),
+                                );
                         }
                         Some(DiagramState::Error(error)) => {
                             preview = preview
@@ -2488,29 +2611,6 @@ impl Render for MarkdownEditor {
 
 // pure helpers (unit-tested)
 
-/// Map a fence info string onto a highlighter language.
-fn fence_language(lang: Option<&str>) -> Language {
-    let tag = lang
-        .unwrap_or("")
-        .split_whitespace()
-        .next()
-        .unwrap_or("")
-        .to_ascii_lowercase();
-    match tag.as_str() {
-        "rust" | "rs" => Language::Rust,
-        "sql" => Language::Sql,
-        "json" | "jsonc" => Language::Json,
-        "toml" => Language::Toml,
-        "python" | "py" => Language::Python,
-        "javascript" | "js" | "jsx" => Language::JavaScript,
-        "typescript" | "ts" | "tsx" => Language::TypeScript,
-        "go" | "golang" => Language::Go,
-        "c" | "h" | "cpp" | "c++" | "cxx" | "hpp" => Language::C,
-        "markdown" | "md" => Language::Markdown,
-        _ => Language::None,
-    }
-}
-
 /// Classify a single line out of document context (fences and frontmatter
 /// need the document pass; lists, quotes, and headings don't).
 fn classify_alone(line: &str) -> Block {
@@ -2681,17 +2781,6 @@ mod tests {
         assert_eq!(total, 10);
         assert_eq!(s[1], (3, Some(TokenKind::Keyword)));
         assert_eq!(cover(4, &[]), vec![(4, None)]);
-    }
-
-    #[test]
-    fn fence_language_mapping() {
-        assert_eq!(fence_language(Some("rust")), Language::Rust);
-        assert_eq!(fence_language(Some("rs")), Language::Rust);
-        assert_eq!(fence_language(Some("json")), Language::Json);
-        assert_eq!(fence_language(Some("python")), Language::Python);
-        assert_eq!(fence_language(Some("TS title")), Language::TypeScript);
-        assert_eq!(fence_language(Some("unknown")), Language::None);
-        assert_eq!(fence_language(None), Language::None);
     }
 
     #[test]
