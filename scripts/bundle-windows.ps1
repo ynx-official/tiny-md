@@ -14,7 +14,7 @@ if ($Version -notmatch '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9
     throw "Invalid version: $Version (expected X.Y.Z or X.Y.Z-beta.1)"
 }
 
-# Build with the static MSVC runtime so the ZIP can be used without a separate
+# Build with the static MSVC runtime so the app can be used without a separate
 # Visual C++ runtime installation. Explicit target keeps host proc macros dynamic.
 $env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS = '-C target-feature=+crt-static'
 cargo build --locked --release -p tiny-md --target x86_64-pc-windows-msvc
@@ -38,6 +38,20 @@ Copy-Item -LiteralPath $executable -Destination "$bundle/tiny-md.exe" -Force
 Copy-Item -LiteralPath 'fixtures/welcome.md' -Destination "$bundle/welcome.md" -Force
 Set-Content -LiteralPath "$bundle/version.txt" -Value $Version -Encoding utf8
 
-$archive = "target/release-assets/tiny-md-v$Version-windows-x64.zip"
-Compress-Archive -LiteralPath $bundle -DestinationPath $archive -Force
-Write-Output "Built: $archive"
+$compiler = Get-Command ISCC.exe -ErrorAction SilentlyContinue
+if ($compiler) {
+    $compilerPath = $compiler.Source
+} else {
+    $compilerPath = Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6/ISCC.exe'
+}
+if (!(Test-Path -LiteralPath $compilerPath)) {
+    throw 'Inno Setup 6 is required to build the Windows installer'
+}
+$coreVersion = ($Version -split '[-+]')[0]
+$sourceRoot = (Get-Location).Path
+$output = Join-Path $sourceRoot 'target/release-assets'
+& $compilerPath "/DAppVersion=$Version" "/DCoreVersion=$coreVersion" "/DSourceRoot=$sourceRoot" "/O$output" 'scripts/windows-installer.iss'
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+$installer = Join-Path $output "tiny-md-v$Version-windows-x64-setup.exe"
+if (!(Test-Path -LiteralPath $installer)) { throw 'The Windows installer was not generated' }
+Write-Output "Built: $installer"

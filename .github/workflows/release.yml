@@ -114,8 +114,7 @@ jobs:
           plutil -lint "$bundle/Contents/Info.plist"
           test -x "$bundle/Contents/MacOS/tiny-md"
           lipo -verify_arch "$RELEASE_ARCH" "$bundle/Contents/MacOS/tiny-md"
-          mkdir -p target/release-assets
-          ditto -c -k --sequesterRsrc --keepParent "$bundle" "target/release-assets/tiny-md-v${RELEASE_VERSION}-macos-${RELEASE_ARCH}.zip"
+          sh scripts/package-macos.sh "$RELEASE_VERSION" "$bundle"
 
       - name: Build and package Windows x64 application
         if: matrix.platform == 'windows'
@@ -124,11 +123,13 @@ jobs:
           RELEASE_VERSION: ${{ steps.version.outputs.version }}
         run: ./scripts/bundle-windows.ps1 -Version $env:RELEASE_VERSION
 
-      - name: Upload build archive
+      - name: Upload installer
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: release-${{ matrix.platform }}-${{ matrix.arch }}
-          path: target/release-assets/*.zip
+          path: |
+            target/release-assets/*.dmg
+            target/release-assets/*.exe
           if-no-files-found: error
           compression-level: 0
           retention-days: 14
@@ -141,7 +142,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - name: Download build archives
+      - name: Download installers
         uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
           pattern: release-*
@@ -151,8 +152,9 @@ jobs:
       - name: Generate checksums
         working-directory: release-assets
         run: |
-          test "$(find . -maxdepth 1 -name '*.zip' | wc -l)" -eq 2
-          sha256sum ./*.zip > SHA256SUMS
+          test "$(find . -maxdepth 1 -name '*.dmg' | wc -l)" -eq 1
+          test "$(find . -maxdepth 1 -name '*.exe' | wc -l)" -eq 1
+          sha256sum ./*.dmg ./*.exe > SHA256SUMS
           sha256sum --check SHA256SUMS
 
       - name: Create release and upload assets
@@ -162,12 +164,12 @@ jobs:
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            gh release upload "$RELEASE_TAG" release-assets/*.zip release-assets/SHA256SUMS --clobber
+            gh release upload "$RELEASE_TAG" release-assets/*.dmg release-assets/*.exe release-assets/SHA256SUMS --clobber
           else
             flags=()
             if [[ "${RELEASE_TAG%%+*}" == *-* ]]; then
               flags+=(--prerelease)
             fi
-            gh release create "$RELEASE_TAG" release-assets/*.zip release-assets/SHA256SUMS \
+            gh release create "$RELEASE_TAG" release-assets/*.dmg release-assets/*.exe release-assets/SHA256SUMS \
               --verify-tag --title "Tiny MD $RELEASE_TAG" --generate-notes "${flags[@]}"
           fi
