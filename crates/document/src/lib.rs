@@ -201,6 +201,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn retargeted_document_keeps_dirty_baseline_encoding_and_conflict_checks() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(dir.path()).unwrap();
+        let old = root.join("old.md");
+        let new = root.join("renamed.md");
+        fs::write(&old, b"\xef\xbb\xbf# title\r\n").unwrap();
+        let (mut document, _) = Document::open(&old).unwrap();
+        fs::rename(&old, &new).unwrap();
+        document.retarget_after_move(&old, &new);
+        assert_eq!(document.path(), Some(new.as_path()));
+        assert!(document.is_dirty("# changed\n"));
+        document.save("# changed\n").unwrap();
+        assert_eq!(fs::read(&new).unwrap(), b"\xef\xbb\xbf# changed\r\n");
+        fs::write(&new, "external edit").unwrap();
+        assert!(document.save("next edit").is_err());
+        assert_eq!(fs::read(&new).unwrap(), b"external edit");
+    }
+
+    #[test]
     fn saves_unicode_and_preserves_bom_crlf_and_final_newline() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("中文.md");

@@ -1,9 +1,13 @@
 use crate::*;
-use gpui_component::{Icon, IconName, menu::DropdownMenu};
+use gpui_component::{
+    Icon, IconName,
+    menu::{ContextMenuExt, DropdownMenu},
+};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum SidebarMode {
     Documents,
+    Tree,
     Outline,
 }
 
@@ -65,7 +69,15 @@ impl TinyMd {
                 this.editor.read(cx).focus_handle().focus(window);
                 match result {
                     Ok(Ok(Some(paths))) => {
-                        this.library_root = paths.into_iter().next();
+                        if let Some(path) = paths.into_iter().next() {
+                            match std::fs::canonicalize(path) {
+                                Ok(path) => this.library_root = Some(path),
+                                Err(error) => {
+                                    this.fail(format!("打开文件夹失败：{error}"), cx);
+                                    return;
+                                }
+                            }
+                        }
                         this.show_sidebar(SidebarMode::Documents, cx);
                         this.refresh_documents(cx);
                     }
@@ -124,15 +136,17 @@ impl TinyMd {
         let ink = rgb(if self.dark { 0xe4e6e9 } else { 0x4b4b4b });
         let muted = rgb(if self.dark { 0x989ea7 } else { 0x999999 });
         let selected = rgb(if self.dark { 0x30343b } else { 0xeeeeee });
+        let view = cx.weak_entity();
         let tabs = div()
             .flex()
             .justify_center()
             .items_center()
-            .gap_2()
+            .gap_1()
             .h(px(44.0))
             .children(
                 [
-                    (SidebarMode::Documents, "文档"),
+                    (SidebarMode::Documents, "文档列表"),
+                    (SidebarMode::Tree, "文档树"),
                     (SidebarMode::Outline, "大纲"),
                 ]
                 .into_iter()
@@ -149,6 +163,8 @@ impl TinyMd {
             );
         let mut list = div()
             .id("sidebar-content")
+            .flex()
+            .flex_col()
             .flex_1()
             .min_h_0()
             .overflow_y_scroll();
@@ -158,6 +174,7 @@ impl TinyMd {
                 div()
                     .id(("heading", line))
                     .py_2()
+                    .flex_shrink_0()
                     .pl(px(heading.level.saturating_sub(1) as f32 * 10.0))
                     .text_sm()
                     .text_color(if heading.level <= 2 { ink } else { muted })
@@ -180,6 +197,8 @@ impl TinyMd {
                 );
             }
         } else {
+            let tree = self.sidebar_mode == SidebarMode::Tree;
+            let query = self.library_query.read(cx).value();
             let mut entries = self.documents.clone();
             if let Some(path) = self.document.path()
                 && !entries.iter().any(|entry| entry.path == path)
@@ -189,51 +208,99 @@ impl TinyMd {
                     library::Entry {
                         path: path.to_owned(),
                         preview: library::summary(&self.editor.read(cx).text()),
+                        is_dir: false,
                     },
                 );
             }
             if self.document.path().is_none() {
+                let weak = view.clone();
                 list = list.child(
-                    div()
-                        .px_4()
-                        .py_3()
-                        .bg(selected)
-                        .child(
-                            div()
-                                .text_sm()
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(ink)
-                                .child(self.document.title()),
-                        )
-                        .child(
-                            div()
-                                .mt_1()
-                                .text_sm()
-                                .text_color(muted)
-                                .child(library::summary(&self.editor.read(cx).text())),
-                        ),
+                    div().id("untitled-context").flex_shrink_0().child(
+                        div()
+                            .px_4()
+                            .py_3()
+                            .bg(selected)
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(ink)
+                                    .child(self.document.title()),
+                            )
+                            .when(!tree, |row| {
+                                row.child(
+                                    div()
+                                        .mt_1()
+                                        .text_sm()
+                                        .text_color(muted)
+                                        .child(library::summary(&self.editor.read(cx).text())),
+                                )
+                            })
+                            .context_menu(move |menu, _, cx| {
+                                if let Some(view) = weak.upgrade() {
+                                    view.read(cx).document_context_menu(
+                                        menu,
+                                        None,
+                                        false,
+                                        view.downgrade(),
+                                    )
+                                } else {
+                                    menu
+                                }
+                            }),
+                    ),
                 );
             }
-            list = list.children(entries.into_iter().enumerate().map(|(i, entry)| {
+            let mut visible = library::visible(&entries, &query, &self.collapsed_folders, tree);
+            if !tree {
+                visible.sort_by_key(|entry| {
+                    entry
+                        .path
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_ascii_lowercase()
+                });
+            }
+            if visible.is_empty() && (!query.trim().is_empty() || self.document.path().is_some()) {
+                list = list.child(div().px_4().py_3().text_sm().text_color(muted).child(
+                    if query.trim().is_empty() {
+                        "文件夹中还没有 Markdown 文档"
+                    } else {
+                        "没有匹配的文档"
+                    },
+                ));
+            }
+            list = list.children(visible.into_iter().enumerate().map(|(i, entry)| {
                 let active = Some(entry.path.as_path()) == self.document.path();
-                let title = entry
-                    .path
+                let path = entry.path.clone();
+                let directory = entry.is_dir;
+                let depth = self
+                    .library_root
+                    .as_ref()
+                    .and_then(|root| path.strip_prefix(root).ok())
+                    .map(|relative| relative.components().count().saturating_sub(1))
+                    .unwrap_or(0);
+                let title = path
                     .file_name()
                     .unwrap_or_default()
                     .to_string_lossy()
                     .into_owned();
-                let path = entry.path;
-                div()
+                let click_path = path.clone();
+                let weak = view.clone();
+                let row = div()
                     .id(("document-entry", i))
                     .px_4()
                     .py_3()
                     .w_full()
+                    .when(tree, |row| row.py_2().pl(px(16.0 + depth as f32 * 14.0)))
                     .when(active, |row| row.bg(selected))
                     .cursor_pointer()
                     .hover(|style| style.bg(selected))
                     .on_click(cx.listener(move |this, _, w, cx| {
-                        if this.document.path() != Some(path.as_path()) {
-                            this.request(Intent::OpenPath(path.clone()), w, cx);
+                        if directory {
+                            this.toggle_folder(click_path.clone(), cx);
+                        } else if this.document.path() != Some(click_path.as_path()) {
+                            this.request(Intent::OpenPath(click_path.clone()), w, cx);
                         }
                     }))
                     .child(
@@ -241,6 +308,17 @@ impl TinyMd {
                             .flex()
                             .items_center()
                             .gap_1()
+                            .when(directory, |row| {
+                                row.child(div().text_color(muted).child(
+                                    if self.collapsed_folders.contains(&path)
+                                        && query.trim().is_empty()
+                                    {
+                                        "▸"
+                                    } else {
+                                        "▾"
+                                    },
+                                ))
+                            })
                             .child(
                                 div()
                                     .flex_1()
@@ -255,16 +333,32 @@ impl TinyMd {
                                 row.child(div().text_color(muted).child("•"))
                             }),
                     )
-                    .child(
-                        div()
-                            .mt_1()
-                            .text_size(px(12.0))
-                            .line_height(px(18.0))
-                            .max_h(px(54.0))
-                            .overflow_hidden()
-                            .text_color(muted)
-                            .child(entry.preview),
-                    )
+                    .when(!tree, |row| {
+                        row.child(
+                            div()
+                                .mt_1()
+                                .text_size(px(12.0))
+                                .line_height(px(18.0))
+                                .max_h(px(54.0))
+                                .overflow_hidden()
+                                .text_color(muted)
+                                .child(entry.preview.clone()),
+                        )
+                    })
+                    .context_menu(move |menu, _, cx| {
+                        if let Some(view) = weak.upgrade() {
+                            view.read(cx).document_context_menu(
+                                menu,
+                                Some(path.clone()),
+                                directory,
+                                view.downgrade(),
+                            )
+                        } else {
+                            menu
+                        }
+                    });
+                // Each wrapper needs a distinct parent scope for popup element state.
+                div().id(("document-context", i)).flex_shrink_0().child(row)
             }));
             if let Some(error) = &self.library_error {
                 list = list.child(
@@ -276,6 +370,26 @@ impl TinyMd {
                         .child(error.clone()),
                 );
             }
+            let weak = view.clone();
+            list = list.child(
+                div().id("empty-context").flex_1().min_h(px(60.0)).child(
+                    div()
+                        .size_full()
+                        .min_h(px(60.0))
+                        .context_menu(move |menu, _, cx| {
+                            if let Some(view) = weak.upgrade() {
+                                view.read(cx).document_context_menu(
+                                    menu,
+                                    None,
+                                    false,
+                                    view.downgrade(),
+                                )
+                            } else {
+                                menu
+                            }
+                        }),
+                ),
+            );
         }
         div()
             .flex()
@@ -286,8 +400,35 @@ impl TinyMd {
             .border_r_1()
             .border_color(selected)
             .child(tabs)
+            .when(
+                self.library_search_open && self.sidebar_mode != SidebarMode::Outline,
+                |panel| {
+                    panel.child(
+                        div()
+                            .px_3()
+                            .pb_2()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .child(Input::new(&self.library_query).small())
+                            .child(
+                                Button::new("close-library-search")
+                                    .label("×")
+                                    .small()
+                                    .ghost()
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.library_search_open = false;
+                                        this.library_query.update(cx, |input, cx| {
+                                            input.set_value("", window, cx)
+                                        });
+                                        cx.notify();
+                                    })),
+                            ),
+                    )
+                },
+            )
             .child(list)
-            .when(self.sidebar_mode == SidebarMode::Documents, |panel| {
+            .when(self.sidebar_mode != SidebarMode::Outline, |panel| {
                 panel.child(
                     div()
                         .px_3()

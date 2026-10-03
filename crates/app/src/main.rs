@@ -13,8 +13,8 @@ use tiny_md_editor::{
 #[cfg(target_os = "macos")]
 mod app_icon;
 mod assets;
-mod library;
 mod document_menu;
+mod library;
 mod menus;
 mod panels;
 use menus::*;
@@ -176,8 +176,10 @@ impl TinyMd {
         }
         let query = cx.new(|cx| InputState::new(window, cx).placeholder("查找（区分大小写）"));
         let replacement = cx.new(|cx| InputState::new(window, cx).placeholder("替换为"));
-        let library_query = cx.new(|cx| InputState::new(window, cx).placeholder("搜索文档名称或内容"));
-        cx.subscribe(&library_query, |_, _, _: &InputEvent, cx| cx.notify()).detach();
+        let library_query =
+            cx.new(|cx| InputState::new(window, cx).placeholder("搜索文档名称或内容"));
+        cx.subscribe(&library_query, |_, _, _: &InputEvent, cx| cx.notify())
+            .detach();
         cx.subscribe_in(&query, window, |this, _, event: &InputEvent, window, cx| {
             match event {
                 InputEvent::Change => this.find(false, false, window, cx),
@@ -372,10 +374,13 @@ impl TinyMd {
         cx: &mut Context<Self>,
     ) {
         self.document = document;
-        if let Some(parent) = self.document.path().and_then(Path::parent) {
-            if !self.library_root.as_ref().is_some_and(|root| parent.starts_with(root)) {
-                self.library_root = Some(parent.to_owned());
-            }
+        if let Some(parent) = self.document.path().and_then(Path::parent)
+            && !self
+                .library_root
+                .as_ref()
+                .is_some_and(|root| parent.starts_with(root))
+        {
+            self.library_root = Some(parent.to_owned());
         }
         if let Some(path) = self.document.path() {
             remember(path, cx);
@@ -511,10 +516,13 @@ impl TinyMd {
                 match result {
                     Ok(document) => {
                         this.document = document;
-                        if let Some(parent) = this.document.path().and_then(Path::parent) {
-                            if !this.library_root.as_ref().is_some_and(|root| parent.starts_with(root)) {
-                                this.library_root = Some(parent.to_owned());
-                            }
+                        if let Some(parent) = this.document.path().and_then(Path::parent)
+                            && !this
+                                .library_root
+                                .as_ref()
+                                .is_some_and(|root| parent.starts_with(root))
+                        {
+                            this.library_root = Some(parent.to_owned());
                         }
                         this.refresh_documents(cx);
                         if let Some(path) = this.document.path() {
@@ -995,9 +1003,9 @@ impl Render for TinyMd {
             .on_action(cx.listener(|this, _: &ShowOutline, _, cx| {
                 this.show_sidebar(SidebarMode::Outline, cx)
             }))
-            .on_action(cx.listener(|this, _: &ShowTree, _, cx| {
-                this.show_sidebar(SidebarMode::Tree, cx)
-            }))
+            .on_action(
+                cx.listener(|this, _: &ShowTree, _, cx| this.show_sidebar(SidebarMode::Tree, cx)),
+            )
             .on_action(cx.listener(|this, _: &OpenFolder, w, cx| this.open_folder(w, cx)))
             .on_action(cx.listener(|this, _: &InsertImage, w, cx| this.insert_image(w, cx)))
             .on_action(cx.listener(|this, _: &CopyPlain, window, cx| {
