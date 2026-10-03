@@ -11,6 +11,120 @@ pub enum Navigation {
     NextRow,
 }
 
+#[derive(Clone, Copy)]
+pub enum TableCommand {
+    RowAbove,
+    RowBelow,
+    ColumnLeft,
+    ColumnRight,
+    DeleteRow,
+    DeleteColumn,
+    Align(Alignment),
+}
+
+/// Structural edits replace only this table in one history step.
+pub fn edit(model: &mut EditorModel, command: TableCommand) -> bool {
+    let cursor = model.cursor();
+    let (tables, map) = collect(model.lines());
+    let Some(index) = map.get(cursor.line).copied().flatten() else {
+        return false;
+    };
+    let table = &tables[index];
+    if cursor.line == table.start + 1 {
+        return false;
+    }
+    let byte = byte_for_col(model.line(cursor.line).unwrap_or(""), cursor.col);
+    let column = table.rows[cursor.line - table.start]
+        .iter()
+        .position(|range| byte <= range.end)
+        .unwrap_or_else(|| {
+            table.rows[cursor.line - table.start]
+                .len()
+                .saturating_sub(1)
+        });
+    let mut alignments = table.alignments.clone();
+    let mut rows = table
+        .rows
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| *i != 1)
+        .map(|(i, cells)| {
+            let source = &model.lines()[table.start + i];
+            (0..alignments.len())
+                .map(|column| {
+                    cells
+                        .get(column)
+                        .map_or("", |range| &source[range.clone()])
+                        .to_owned()
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    let mut row = if cursor.line == table.start {
+        0
+    } else {
+        cursor.line - table.start - 1
+    };
+    let mut col = column;
+    match command {
+        TableCommand::RowAbove | TableCommand::RowBelow => {
+            let at = if matches!(command, TableCommand::RowAbove) {
+                row.max(1)
+            } else {
+                row + 1
+            };
+            rows.insert(at, vec![String::new(); alignments.len()]);
+            row = at;
+        }
+        TableCommand::ColumnLeft | TableCommand::ColumnRight => {
+            let at = column + usize::from(matches!(command, TableCommand::ColumnRight));
+            alignments.insert(at, Alignment::Left);
+            for cells in &mut rows {
+                cells.insert(at, String::new());
+            }
+            col = at;
+        }
+        TableCommand::DeleteRow => {
+            if row == 0 {
+                return false;
+            }
+            rows.remove(row);
+            row = row.min(rows.len() - 1);
+        }
+        TableCommand::DeleteColumn => {
+            if alignments.len() <= 1 {
+                return false;
+            }
+            alignments.remove(column);
+            for cells in &mut rows {
+                cells.remove(column);
+            }
+            col = column.min(alignments.len() - 1);
+        }
+        TableCommand::Align(alignment) => alignments[column] = alignment,
+    }
+    let delimiter = alignments
+        .iter()
+        .map(|alignment| match alignment {
+            Alignment::Left => "---".to_owned(),
+            Alignment::Center => ":---:".into(),
+            Alignment::Right => "---:".into(),
+        })
+        .collect::<Vec<_>>();
+    rows.insert(1, delimiter);
+    let source = rows
+        .iter()
+        .map(|cells| format!("| {} |", cells.join(" | ")))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let end = model.line(table.end).unwrap_or("").chars().count();
+    model.move_to(table.start, 0, false);
+    model.move_to(table.end, end, true);
+    model.insert(&source);
+    focus_cell(model, table.start + row + usize::from(row > 0), col);
+    true
+}
+
 fn closing_pipe(source: &str) -> bool {
     let source = source.trim_end();
     source.ends_with('|')
@@ -342,6 +456,29 @@ impl Table {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn structural_edits_preserve_escaped_unicode_cells_and_undo_as_one_step() {
+        use super::*;
+        let original = "前文\n\n| 中文 | 状态 |\n| --- | ---: |\n| a\\|b 🌱 | 完成 |\n\n后文";
+        for command in [
+            TableCommand::RowAbove,
+            TableCommand::RowBelow,
+            TableCommand::ColumnLeft,
+            TableCommand::ColumnRight,
+            TableCommand::DeleteRow,
+            TableCommand::DeleteColumn,
+            TableCommand::Align(Alignment::Center),
+        ] {
+            let mut model = EditorModel::new(original);
+            model.move_to(4, 3, false);
+            assert!(edit(&mut model, command));
+            assert!(model.text().starts_with("前文\n\n"));
+            assert!(model.text().ends_with("\n\n后文"));
+            assert_eq!(collect(model.lines()).0.len(), 1);
+            assert!(model.undo());
+            assert_eq!(model.text(), original);
+        }
+    }
     use super::*;
     fn lines(source: &str) -> Vec<String> {
         source.split('\n').map(str::to_owned).collect()

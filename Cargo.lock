@@ -5913,9 +5913,13 @@ dependencies = [
 name = "tiny-md"
 version = "0.1.0"
 dependencies = [
+ "embed-resource",
  "gpui",
  "gpui-component",
  "guise-ui",
+ "objc2",
+ "objc2-app-kit",
+ "objc2-foundation",
  "tiny-md-document",
  "tiny-md-editor",
 ]

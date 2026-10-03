@@ -408,6 +408,8 @@ pub struct MarkdownEditor {
     model: EditorModel,
     ime: ImeState,
     source_mode: bool,
+    focus_mode: bool,
+    typewriter: bool,
     placeholder: SharedString,
     read_only: bool,
     font_size: f32,
@@ -448,6 +450,8 @@ impl MarkdownEditor {
             model: EditorModel::new(""),
             ime: ImeState::default(),
             source_mode: false,
+            focus_mode: false,
+            typewriter: false,
             placeholder: SharedString::default(),
             read_only: false,
             font_size: 15.0,
@@ -472,6 +476,7 @@ impl MarkdownEditor {
     /// Initial markdown text (`text()` is the getter).
     pub fn value(mut self, text: &str) -> Self {
         self.model.set_text(text);
+        self.normalize_heading_cursor();
         self
     }
 
@@ -525,12 +530,46 @@ impl MarkdownEditor {
         self.model.text()
     }
 
+    pub fn copy_plain(&mut self, cx: &mut Context<Self>) {
+        self.finish_composition(cx);
+        if let Some(text) = self.model.copy() {
+            cx.write_to_clipboard(ClipboardItem::new_string(crate::commands::plain_text(
+                &text,
+            )));
+        }
+    }
+
+    pub fn block_label(&self) -> &'static str {
+        let mut state = DocState::default();
+        let block = self
+            .model
+            .lines()
+            .iter()
+            .take(self.model.cursor().line + 1)
+            .map(|line| classify(line, &mut state))
+            .last();
+        match block {
+            Some(Block::Heading { level: 1, .. }) => "一级标题",
+            Some(Block::Heading { level: 2, .. }) => "二级标题",
+            Some(Block::Heading { level: 3, .. }) => "三级标题",
+            Some(Block::Heading { level: 4, .. }) => "四级标题",
+            Some(Block::Heading { level: 5, .. }) => "五级标题",
+            Some(Block::Heading { .. }) => "六级标题",
+            Some(Block::Quote { .. }) => "引用",
+            Some(Block::Bullet { .. } | Block::Ordered { .. } | Block::Task { .. }) => "列表",
+            Some(Block::CodeLine | Block::Fence { .. }) => "代码块",
+            Some(Block::Table) => "表格",
+            _ => "段落",
+        }
+    }
+
     /// Replace the document, resetting cursor, selection, and history.
     pub fn set_text(&mut self, value: &str, cx: &mut Context<Self>) {
         self.copied_block = None;
         self.diagrams.clear();
         self.ime.reset();
         self.model.set_text(value);
+        self.normalize_heading_cursor();
         self.scroll.set_offset(point(px(0.0), px(0.0)));
         self.scroll_to_cursor = true;
         self.goal_x = None;
@@ -546,6 +585,7 @@ impl MarkdownEditor {
     pub fn set_source_mode(&mut self, enabled: bool, cx: &mut Context<Self>) {
         self.finish_composition(cx);
         self.source_mode = enabled;
+        self.normalize_heading_cursor();
         self.scroll_to_cursor = true;
         cx.notify();
     }
@@ -567,6 +607,126 @@ impl MarkdownEditor {
         cx.notify();
     }
 
+    pub fn set_font_size(&mut self, size: f32, cx: &mut Context<Self>) {
+        self.font_size = size.clamp(12.0, 30.0);
+        self.scroll_to_cursor = true;
+        cx.notify();
+    }
+
+    pub fn set_writing_modes(&mut self, focus: bool, typewriter: bool, cx: &mut Context<Self>) {
+        self.focus_mode = focus;
+        self.typewriter = typewriter;
+        self.scroll_to_cursor = true;
+        cx.notify();
+    }
+
+    pub fn command(&mut self, command: crate::EditorCommand, cx: &mut Context<Self>) {
+        use crate::EditorCommand;
+        if self.read_only && !matches!(command, EditorCommand::SelectLine) {
+            return;
+        }
+        self.finish_composition(cx);
+        match command {
+            EditorCommand::Wrap(marker) => self.toggle_wrap(marker, cx),
+            EditorCommand::Link => self.insert_link(cx),
+            EditorCommand::ToggleTask => {
+                self.toggle_task(self.model.cursor().line, cx);
+            }
+            EditorCommand::TableEdit(command) => {
+                self.edit(cx, |model| tables::edit(model, command));
+            }
+            command => self.edit(cx, |model| crate::commands::apply(model, command)),
+        }
+    }
+
+    pub fn match_count(&self, query: &str) -> usize {
+        crate::commands::matches(&self.text(), query).len()
+    }
+
+    /// Search uses original buffer byte positions, including hidden Markdown syntax.
+    pub fn find(
+        &mut self,
+        query: &str,
+        backwards: bool,
+        advance: bool,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        self.finish_composition(cx);
+        let ranges = crate::commands::matches(&self.text(), query);
+        if ranges.is_empty() {
+            return false;
+        }
+        let selection = self.model.selection();
+        let pos = match selection {
+            Some((start, end)) if advance => {
+                if backwards {
+                    start
+                } else {
+                    end
+                }
+            }
+            Some((start, _)) => start,
+            None => self.model.cursor(),
+        };
+        let byte = crate::commands::byte_position(&self.model, pos);
+        let range = if backwards {
+            ranges
+                .iter()
+                .rev()
+                .find(|range| range.end <= byte)
+                .unwrap_or(ranges.last().unwrap())
+        } else {
+            ranges
+                .iter()
+                .find(|range| range.start >= byte)
+                .unwrap_or(&ranges[0])
+        }
+        .clone();
+        self.edit(cx, |model| crate::commands::select_match(model, range));
+        true
+    }
+
+    pub fn replace_match(&mut self, query: &str, value: &str, cx: &mut Context<Self>) -> bool {
+        if self.read_only || query.is_empty() {
+            return false;
+        }
+        self.finish_composition(cx);
+        if self.model.selected_text().as_deref() != Some(query)
+            && !self.find(query, false, false, cx)
+        {
+            return false;
+        }
+        self.edit(cx, |model| {
+            if value.is_empty() {
+                model.delete_selection();
+            } else {
+                model.insert(value);
+            }
+        });
+        true
+    }
+
+    pub fn replace_all(&mut self, query: &str, value: &str, cx: &mut Context<Self>) -> usize {
+        if self.read_only || query.is_empty() {
+            return 0;
+        }
+        self.finish_composition(cx);
+        let source = self.text();
+        let count = crate::commands::matches(&source, query).len();
+        if count > 0 {
+            let replaced = source.replace(query, value);
+            self.edit(cx, |model| {
+                model.select_all();
+                if replaced.is_empty() {
+                    model.delete_selection();
+                } else {
+                    model.insert(&replaced);
+                }
+            });
+        }
+        count
+    }
+
     /// Read access to the underlying [`EditorModel`] — cursor, selection,
     /// lines — for hosts building features over the buffer.
     pub fn model(&self) -> &EditorModel {
@@ -580,6 +740,7 @@ impl MarkdownEditor {
         self.finish_composition(cx);
         let before = self.model.text();
         let result = f(&mut self.model);
+        self.normalize_heading_cursor();
         let after = self.model.text();
         if after != before {
             cx.emit(MarkdownEditorEvent::Change(after));
@@ -809,7 +970,8 @@ impl MarkdownEditor {
         let cursor = self.model.cursor();
         let line = self.model.line(cursor.line).unwrap_or("").to_string();
         let content = match classify_alone(&line) {
-            Block::Bullet { content, .. }
+            Block::Heading { content, .. }
+            | Block::Bullet { content, .. }
             | Block::Ordered { content, .. }
             | Block::Task { content, .. }
             | Block::Quote { content, .. } => content,
@@ -846,7 +1008,13 @@ impl MarkdownEditor {
         match ks.key.as_str() {
             "left" => {
                 if m.line() {
-                    self.model.home(shift);
+                    let cursor = self.model.cursor();
+                    let start = if self.source_mode {
+                        0
+                    } else {
+                        crate::commands::heading_start(&self.model, cursor.line)
+                    };
+                    self.model.move_to(cursor.line, start, shift);
                 } else if m.word() {
                     self.model.word_left(shift);
                 } else {
@@ -884,7 +1052,13 @@ impl MarkdownEditor {
                 if m.cmd() {
                     self.model.doc_start(shift);
                 } else {
-                    self.model.home(shift);
+                    let cursor = self.model.cursor();
+                    let start = if self.source_mode {
+                        0
+                    } else {
+                        crate::commands::heading_start(&self.model, cursor.line)
+                    };
+                    self.model.move_to(cursor.line, start, shift);
                 }
                 self.after_move(cx);
             }
@@ -1274,9 +1448,16 @@ impl MarkdownEditor {
     }
 
     fn after_move(&mut self, cx: &mut Context<Self>) {
+        self.normalize_heading_cursor();
         self.scroll_to_cursor = true;
         cx.notify();
         cx.stop_propagation();
+    }
+
+    fn normalize_heading_cursor(&mut self) {
+        if !self.source_mode && !self.ime.active() {
+            crate::commands::clamp_heading_cursor(&mut self.model);
+        }
     }
 
     fn cursor_vertical_bounds(&self) -> Option<(f32, f32)> {
@@ -1300,7 +1481,16 @@ impl MarkdownEditor {
             return;
         }
         let offset = self.scroll.offset();
-        let y = scroll_adjust(f32::from(offset.y), view_h, top, bottom);
+        let padding = if self.typewriter {
+            view_h * 0.45
+        } else {
+            PAD_Y
+        };
+        let y = if self.typewriter {
+            (view_h * 0.45 - top - padding).min(0.0)
+        } else {
+            scroll_adjust(f32::from(offset.y), view_h, top + padding, bottom + padding)
+        };
         if y != f32::from(offset.y) {
             self.scroll.set_offset(point(offset.x, px(y)));
         }
@@ -1488,10 +1678,21 @@ impl Render for MarkdownEditor {
                 hl_state = LineState::default();
             }
             let reveal = reveal_range.is_some_and(|(s, e)| i >= s && i <= e);
-            let plan = plan(line, &block, lang.as_deref(), reveal);
+            let plan = plan(
+                line,
+                &block,
+                lang.as_deref(),
+                reveal && !matches!(block, Block::Heading { .. }),
+            );
 
             let m = metrics(&plan.kind);
-            let (scale, lh, pt, pb) = (m.scale, m.line_height, m.pad_top, m.pad_bottom);
+            let scale = match plan.kind {
+                RowKind::Heading(1) => 2.0,
+                RowKind::Heading(2) => 1.6,
+                RowKind::Heading(3) => 1.35,
+                _ => m.scale,
+            };
+            let (lh, pt, pb) = (m.line_height, m.pad_top, m.pad_bottom);
             let size = (base * scale).round();
             let line_h = (size * lh).round();
             let mut pad_top = (base * pt).round();
@@ -1755,6 +1956,17 @@ impl Render for MarkdownEditor {
                 .map(|t| f32::from(t.font_size()))
                 .unwrap_or(base);
             let mut el = div().relative().w_full().h(px(row.height));
+            if self.focus_mode
+                && i != cursor.line
+                && !selection.is_some_and(|(start, end)| i >= start.line && i <= end.line)
+            {
+                el = el.opacity(0.35);
+            }
+            if matches!(row.plan.kind, RowKind::Heading(1) | RowKind::Heading(2))
+                && !self.source_mode
+            {
+                el = el.border_b_1().border_color(rule_color);
+            }
 
             if let Some(index) = table_membership[i] {
                 let table = &tables[index];
@@ -2203,7 +2415,16 @@ impl Render for MarkdownEditor {
             );
         }
 
-        let content = div().w_full().py(px(PAD_Y)).px(px(PAD_X)).child(lines_col);
+        let padding = if self.typewriter {
+            f32::from(self.scroll.bounds().size.height) * 0.45
+        } else {
+            PAD_Y
+        };
+        let content = div()
+            .w_full()
+            .py(px(padding))
+            .px(px(PAD_X))
+            .child(lines_col);
 
         let mut body = div()
             .id("guise-markdown-body")
@@ -2240,6 +2461,7 @@ impl Render for MarkdownEditor {
             .overflow_y_scroll()
             .track_scroll(&self.scroll)
             .w_full()
+            .h_full()
             .max_h_full()
             .cursor_text()
             .child(content);

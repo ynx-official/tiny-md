@@ -57,15 +57,15 @@ pub(crate) fn open<V: 'static>(
     let entity = cx.new(|cx| {
         let mut m = ContextMenu::new(cx).width(180.0);
         if menu.cut {
-            m = m.item_icon(IconName::Scissors, "Cut", send(Box::new(actions::Cut)));
+            m = m.item_icon(IconName::Scissors, "剪切", send(Box::new(actions::Cut)));
         }
         if menu.copy {
-            m = m.item_icon(IconName::Copy, "Copy", send(Box::new(actions::Copy)));
+            m = m.item_icon(IconName::Copy, "拷贝", send(Box::new(actions::Copy)));
         }
         if menu.paste {
             m = m.item_icon(
                 IconName::ClipboardPaste,
-                "Paste",
+                "粘贴",
                 send(Box::new(actions::Paste)),
             );
         }
@@ -74,7 +74,7 @@ pub(crate) fn open<V: 'static>(
         }
         m.item_icon(
             IconName::TextSelect,
-            "Select All",
+            "全选",
             send(Box::new(actions::SelectAll)),
         )
     });

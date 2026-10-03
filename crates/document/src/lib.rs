@@ -57,6 +57,13 @@ impl Document {
     pub fn path(&self) -> Option<&Path> {
         self.path.as_deref()
     }
+    /// Update the path after a successful filesystem move, preserving the saved
+    /// snapshot, encoding and dirty baseline. The editor keeps its undo history.
+    pub fn retarget_after_move(&mut self, old: &Path, new: &Path) {
+        if self.path.as_deref() == Some(old) {
+            self.path = Some(new.to_owned());
+        }
+    }
     pub fn is_dirty(&self, text: &str) -> bool {
         self.saved_text != text
     }

@@ -3,8 +3,9 @@ set -eu
 cd "$(dirname "$0")/.."
 cargo build --locked -p tiny-md
 bundle="$(pwd)/target/Tiny MD.app"
-mkdir -p "$bundle/Contents/MacOS"
+mkdir -p "$bundle/Contents/MacOS" "$bundle/Contents/Resources"
 cp target/debug/tiny-md "$bundle/Contents/MacOS/tiny-md"
+cp assets/icons/tiny-md.icns "$bundle/Contents/Resources/tiny-md.icns"
 cat > "$bundle/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -13,6 +14,7 @@ cat > "$bundle/Contents/Info.plist" <<'PLIST'
 <key>CFBundleDisplayName</key><string>Tiny MD</string>
 <key>CFBundleIdentifier</key><string>dev.tiny-md.app</string>
 <key>CFBundleExecutable</key><string>tiny-md</string>
+<key>CFBundleIconFile</key><string>tiny-md.icns</string>
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>CFBundleShortVersionString</key><string>0.1.0</string>
 <key>CFBundleVersion</key><string>1</string>
