@@ -15,13 +15,14 @@ git push origin v0.1.0
 ```
 
 后续版本使用新的标签名称。工作流使用标签指向的代码，构建 macOS Apple Silicon
-（arm64）和 Intel（x86_64）两个版本。每个版本先执行格式检查、测试和 Clippy，
-然后使用 release 配置构建并打包 `Tiny MD.app`。
+（arm64）和 Windows x64 两个版本。每个版本先执行格式检查、测试和 Clippy，
+然后使用 release 配置构建。macOS 打包 `Tiny MD.app`，Windows 打包 `tiny-md.exe`、
+示例文档和版本信息。Windows 使用 MSVC x64 工具链，并静态链接 C 运行库。
 
 两个构建均成功后，自动创建对应的 GitHub Release，上传：
 
 - `tiny-md-v0.1.0-macos-arm64.zip`
-- `tiny-md-v0.1.0-macos-x86_64.zip`
+- `tiny-md-v0.1.0-windows-x64.zip`
 - `SHA256SUMS`
 
 预发布标签自动标为 GitHub prerelease。失败后可以在 Actions 中重新运行；
@@ -40,3 +41,14 @@ sh scripts/bundle-macos.sh --release --version 0.1.0
 
 输出为 `target/release/Tiny MD.app`。省略 `--version` 时使用 Cargo 包版本。
 原有 `sh scripts/bundle-macos.sh --launch` 继续生成并启动 `target/Tiny MD.app` 开发包。
+
+在配置好 Rust stable MSVC x64、Visual Studio C++ 工具及 Windows SDK 的 Windows
+开发者 PowerShell 中运行：
+
+```powershell
+./scripts/bundle-windows.ps1 -Version 0.1.0
+```
+
+输出为 `target/release-assets/tiny-md-v0.1.0-windows-x64.zip`。需要 SDK 的 `fxc.exe`
+编译 GPUI 发布版着色器；工作流会自动定位该编译器。Windows 应用的实际交互和输入法
+仍需在 Windows 上验收。
