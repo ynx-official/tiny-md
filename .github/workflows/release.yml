@@ -76,7 +76,7 @@ jobs:
           bundle="target/release/Tiny MD.app"
           plutil -lint "$bundle/Contents/Info.plist"
           test -x "$bundle/Contents/MacOS/tiny-md"
-          lipo -verify_arch "$RELEASE_ARCH" "$bundle/Contents/MacOS/tiny-md"
+          lipo "$bundle/Contents/MacOS/tiny-md" -verify_arch "$RELEASE_ARCH"
           mkdir -p target/release-assets
           ditto -c -k --sequesterRsrc --keepParent "$bundle" "target/release-assets/tiny-md-v${RELEASE_VERSION}-macos-${RELEASE_ARCH}.zip"
 
