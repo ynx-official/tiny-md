@@ -3,6 +3,52 @@ use gpui::TestAppContext;
 use gpui::{EntityInputHandler, ScrollDelta, ScrollWheelEvent, size};
 
 #[gpui::test]
+fn diagram_view_button_emits_a_snapshot_without_editing_the_document(cx: &mut TestAppContext) {
+    cx.update(|cx| guise::Theme::light().init(cx));
+    let text = "paragraph\n\n```mermaid\nflowchart LR\nA --> B\n```";
+    let key = DiagramKey {
+        source: "flowchart LR\nA --> B".into(),
+        dark: false,
+    };
+    let diagram = diagrams::render(&key).unwrap();
+    let image = diagram.image.clone();
+    let snapshot = std::rc::Rc::new(std::cell::RefCell::new(None));
+    let (editor, cx) = cx.add_window_view(|window, cx| {
+        let mut editor = MarkdownEditor::new(cx).value(text).style(MarkdownStyle {
+            bare: true,
+            ..Default::default()
+        });
+        editor.diagrams.insert(key, DiagramState::Ready(diagram));
+        window.focus(&editor.focus);
+        editor
+    });
+    let result = snapshot.clone();
+    cx.update(|_, cx| {
+        cx.subscribe(&editor, move |_, event, _| {
+            if let MarkdownEditorEvent::ViewDiagram(diagram) = event {
+                *result.borrow_mut() = Some(diagram.clone());
+            }
+        })
+        .detach();
+    });
+    draw(cx);
+    draw(cx);
+    let button = cx
+        .debug_bounds("diagram-view")
+        .expect("diagram has a view button");
+    cx.simulate_click(button.center(), gpui::Modifiers::none());
+    assert!(std::sync::Arc::ptr_eq(
+        &image,
+        &snapshot
+            .borrow()
+            .as_ref()
+            .expect("view snapshot emitted")
+            .image
+    ));
+    assert_eq!(cx.read(|cx| editor.read(cx).text()), text);
+}
+
+#[gpui::test]
 fn long_document_scroll_and_paragraph_edit_have_bounded_layout_work(cx: &mut TestAppContext) {
     cx.update(|cx| guise::Theme::light().init(cx));
     // Optional local measurement input; the default remains portable in CI.

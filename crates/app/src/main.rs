@@ -15,6 +15,7 @@ use tiny_md_editor::{
 #[cfg(target_os = "macos")]
 mod app_icon;
 mod assets;
+mod diagram_viewer;
 mod disk_sync;
 mod document_menu;
 mod library;
@@ -297,6 +298,13 @@ impl TinyMd {
                         cx.open_url(target);
                     } else {
                         this.status = format!("链接：{target}");
+                        cx.notify();
+                    }
+                }
+                MarkdownEditorEvent::ViewDiagram(diagram) => {
+                    if let Err(error) = diagram_viewer::open(diagram.clone(), this.dark, cx) {
+                        this.status = format!("查看流程图失败：{error}");
+                        this.error = true;
                         cx.notify();
                     }
                 }

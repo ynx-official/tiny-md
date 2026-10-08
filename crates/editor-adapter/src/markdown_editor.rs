@@ -36,7 +36,7 @@ use gpui::{
     ElementInputHandler, Empty, Entity, EntityId, EventEmitter, FocusHandle, Font, FontStyle,
     FontWeight, Hsla, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, Pixels, ScrollHandle,
     SharedString, StrikethroughStyle, StyleRefinement, Task, TextAlign, TextRun, UnderlineStyle,
-    Window, WrappedLine, canvas, div, img, point, px,
+    Window, WrappedLine, canvas, div, point, px,
 };
 use guise::actions;
 use guise::overlay::ContextMenu;
@@ -85,6 +85,8 @@ pub enum MarkdownEditorEvent {
     /// A link was activated (Cmd+click, or plain click when read-only).
     /// Carries the target — a url or a wikilink page name.
     LinkClick(String),
+    /// A read-only snapshot requested in a separate diagram window.
+    ViewDiagram(diagrams::Diagram),
 }
 
 /// The drag payload for selection-by-mouse; tagged with the owning entity so
@@ -1685,6 +1687,8 @@ impl MarkdownEditor {
         let quote_text = style.quote_text.unwrap_or(dimmed);
         let radius = t.radius(t.default_radius);
         let token_colors: [Hsla; 8] = TokenKind::ALL.map(|kind| token_color(kind, t));
+        let table_hover_bg = t.surface_hover().alpha(0.15);
+        let table_edit_bg = t.primary().alpha(0.06);
 
         let prose = window.text_style().font();
         let mono = Font {
@@ -1853,6 +1857,19 @@ impl MarkdownEditor {
             });
             self.diagrams
                 .insert(cache_key, DiagramState::Loading { _task: task });
+        }
+        // Invalidate a replaced source/theme even if its row is currently offscreen.
+        for (index, key) in all_keys.iter().enumerate() {
+            if let Some(key) = key {
+                let diagram = match self.diagrams.get(key) {
+                    Some(DiagramState::Ready(diagram)) => Some(diagram),
+                    _ => None,
+                };
+                self.diagram_views
+                    .get_mut(&parsed.code[index].start)
+                    .unwrap()
+                    .retain_preview(diagram, cx);
+            }
         }
         let keys = if self.source_mode {
             &all_keys[..0]
@@ -2296,10 +2313,10 @@ impl MarkdownEditor {
                 if i == table.start {
                     el = el.border_t_1().bg(code_bg);
                 } else if (i - table.start) % 2 == 1 {
-                    el = el.bg(t.surface_hover().alpha(0.15));
+                    el = el.bg(table_hover_bg);
                 }
                 if i == cursor.line && focused && !self.read_only {
-                    el = el.bg(t.primary().alpha(0.06));
+                    el = el.bg(table_edit_bg);
                 }
                 for (column, cell) in row.cells.iter().enumerate() {
                     if column > 0 {
@@ -2394,6 +2411,24 @@ impl MarkdownEditor {
                             );
                         }
                         diagram_controls = diagram_controls.child(format!("{:.0}%", scale * 100.0));
+                        let snapshot = diagram.clone();
+                        diagram_controls = diagram_controls.child(
+                            div()
+                                .id(("diagram-view", i))
+                                .debug_selector(|| "diagram-view".into())
+                                .px(px(6.0))
+                                .rounded(px(4.0))
+                                .cursor_pointer()
+                                .hover(|style| style.bg(code_bg))
+                                .child("查看")
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(move |_, _, _, cx| {
+                                        cx.stop_propagation();
+                                        cx.emit(MarkdownEditorEvent::ViewDiagram(snapshot.clone()));
+                                    }),
+                                ),
+                        );
                     }
                     el = el.child(
                         div()
@@ -2510,12 +2545,14 @@ impl MarkdownEditor {
                         );
                     match keys[index].as_ref().and_then(|key| self.diagrams.get(key)) {
                         Some(DiagramState::Ready(diagram)) => {
-                            let view = &self.diagram_views[&block.start];
+                            let view = self.diagram_views.get_mut(&block.start).unwrap();
                             let available = wrap_total - 32.0;
                             let (width, height) = diagram
                                 .display_size(available - diagrams::PREVIEW_PADDING, view.zoom);
                             let viewport_height = diagram
                                 .viewport_height(available - diagrams::PREVIEW_PADDING, view.zoom);
+                            let image_view =
+                                view.preview(diagram, width, height, window.scale_factor(), cx);
                             preview = preview
                                 .child(
                                     div()
@@ -2552,7 +2589,7 @@ impl MarkdownEditor {
                                                             .max(available)))
                                                         .h(px(height + diagrams::PREVIEW_PADDING))
                                                         .child(
-                                                            img(diagram.image.clone())
+                                                            div().child(image_view)
                                                                 .flex_shrink_0()
                                                                 .w(px(width))
                                                                 .h(px(height))

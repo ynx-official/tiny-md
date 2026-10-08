@@ -1,5 +1,6 @@
 //! Native Mermaid → SVG. GPUI decodes the SVG off the UI thread.
-use gpui::{Image, ImageFormat, ScrollHandle, Task, point, px};
+use crate::diagram_image::DiagramImage;
+use gpui::{App, AppContext, Entity, Image, ImageFormat, ScrollHandle, Task, point, px};
 use mermaid_rs_renderer::{
     LayoutConfig, Theme, compute_layout, measure_svg_dimensions, parse_mermaid_strict,
 };
@@ -11,6 +12,7 @@ pub struct DiagramKey {
     pub dark: bool,
 }
 
+#[derive(Debug, Clone)]
 pub struct Diagram {
     pub image: Arc<Image>,
     pub width: f32,
@@ -24,9 +26,42 @@ pub struct DiagramView {
     /// None fits the available width; explicit zoom is relative to SVG units.
     pub zoom: Option<f32>,
     pub scroll: ScrollHandle,
+    preview: Option<Entity<DiagramImage>>,
 }
 
 impl DiagramView {
+    pub fn retain_preview(&mut self, diagram: Option<&Diagram>, cx: &App) {
+        if self
+            .preview
+            .as_ref()
+            .is_some_and(|preview| diagram.is_none_or(|diagram| !preview.read(cx).is_for(diagram)))
+        {
+            self.preview = None;
+        }
+    }
+
+    pub fn preview(
+        &mut self,
+        diagram: &Diagram,
+        width: f32,
+        height: f32,
+        dpi: f32,
+        cx: &mut App,
+    ) -> Entity<DiagramImage> {
+        if self
+            .preview
+            .as_ref()
+            .is_none_or(|preview| !preview.read(cx).is_for(diagram))
+        {
+            self.preview = Some(cx.new(|cx| DiagramImage::new(diagram.clone(), cx)));
+        }
+        let preview = self.preview.as_ref().unwrap().clone();
+        preview.update(cx, |preview, cx| {
+            preview.set_display_size(width, height, dpi, cx)
+        });
+        preview
+    }
+
     pub fn set_zoom(&mut self, zoom: Option<f32>) {
         self.zoom = zoom.map(|zoom| zoom.clamp(0.25, 3.0));
         self.scroll.set_offset(point(px(0.0), px(0.0)));
@@ -34,6 +69,19 @@ impl DiagramView {
 }
 
 impl Diagram {
+    /// Only resize the SVG root canvas. Its viewBox and vector geometry stay intact.
+    pub fn image_at_size(&self, size: RasterSize) -> Arc<Image> {
+        let svg = std::str::from_utf8(self.image.bytes()).expect("renderer produces UTF-8 SVG");
+        let start = svg.find("<svg ").expect("renderer produces an SVG root");
+        let end = start + svg[start..].find('>').unwrap();
+        let root = replace_root_attribute(&svg[start..end], "width", size.width);
+        let root = replace_root_attribute(&root, "height", size.height);
+        Arc::new(Image::from_bytes(
+            ImageFormat::Svg,
+            format!("{}{}{}", &svg[..start], root, &svg[end..]).into_bytes(),
+        ))
+    }
+
     pub fn display_scale(&self, available: f32, zoom: Option<f32>) -> f32 {
         zoom.unwrap_or_else(|| (available.max(1.0) / self.width).min(2.0))
     }
@@ -45,6 +93,49 @@ impl Diagram {
 
     pub fn viewport_height(&self, available: f32, zoom: Option<f32>) -> f32 {
         self.display_size(available, zoom).1 + PREVIEW_PADDING
+    }
+}
+
+fn replace_root_attribute(root: &str, name: &str, value: u32) -> String {
+    let marker = format!(" {name}=\"");
+    let start = root
+        .find(&marker)
+        .expect("renderer supplies canvas dimensions")
+        + marker.len();
+    let end = start + root[start..].find('"').unwrap();
+    format!("{}{value}{}", &root[..start], &root[end..])
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RasterSize {
+    pub width: u32,
+    pub height: u32,
+}
+
+impl RasterSize {
+    pub fn for_display(width: f32, height: f32, dpi: f32) -> Self {
+        let sanitize = |value: f32| {
+            if value.is_finite() && value > 0.0 {
+                value
+            } else {
+                1.0
+            }
+        };
+        let width = sanitize(width) * sanitize(dpi).min(4.0);
+        let height = sanitize(height) * sanitize(dpi).min(4.0);
+        // Preserve the existing per-image safety bound, including at large viewer zoom.
+        let scale = (4096.0 / width)
+            .min(8192.0 / height)
+            .min((16_777_216.0 / (width * height)).sqrt())
+            .min(1.0);
+        Self {
+            width: (width * scale).floor().max(1.0) as u32,
+            height: (height * scale).floor().max(1.0) as u32,
+        }
+    }
+
+    pub fn bytes(self) -> usize {
+        self.width as usize * self.height as usize * 4
     }
 }
 
@@ -101,17 +192,12 @@ pub fn render(key: &DiagramKey) -> Result<Diagram, String> {
     {
         return Err("流程图尺寸过大，无法预览。".into());
     }
-    // Keep long diagrams sharp at readable zoom, while bounding decoded RGBA
-    // allocation to 64 MiB. The viewBox preserves the original graph geometry.
-    let raster_scale = raster_scale(dimensions.width, dimensions.height);
+    // Keep vector geometry at logical size; each view chooses its own pixel canvas.
     let svg = mermaid_rs_renderer::render::render_svg_with_dimensions(
         &layout,
         &theme,
         &config,
-        Some((
-            dimensions.width * raster_scale,
-            dimensions.height * raster_scale,
-        )),
+        Some((dimensions.width, dimensions.height)),
     );
     Ok(Diagram {
         image: Arc::new(Image::from_bytes(ImageFormat::Svg, svg.into_bytes())),
@@ -120,16 +206,33 @@ pub fn render(key: &DiagramKey) -> Result<Diagram, String> {
     })
 }
 
-fn raster_scale(width: f32, height: f32) -> f32 {
-    (4096.0 / width)
-        .min(8192.0 / height)
-        .min((16_777_216.0 / (width * height)).sqrt())
-        .min(3.0)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn generated_svg_does_not_preallocate_a_three_times_larger_canvas() {
+        let diagram = render(&DiagramKey {
+            source: "flowchart TD\nA[开始] --> B[处理] --> C[完成]".into(),
+            dark: false,
+        })
+        .unwrap();
+        let svg = std::str::from_utf8(diagram.image.bytes()).unwrap();
+        let width = svg
+            .split("width=\"")
+            .nth(1)
+            .unwrap()
+            .split('"')
+            .next()
+            .unwrap()
+            .parse::<f32>()
+            .unwrap();
+        assert!(
+            (width - diagram.width).abs() < 1.0,
+            "SVG must retain logical dimensions until the actual display size is known: {width} vs {}",
+            diagram.width
+        );
+    }
 
     #[test]
     fn renders_chinese_branches_in_both_themes() {
@@ -161,14 +264,47 @@ mod tests {
     }
 
     #[test]
-    fn raster_resolution_preserves_long_diagrams_with_bounded_allocation() {
-        assert_eq!(raster_scale(400.0, 2400.0), 3.0);
+    fn raster_resolution_follows_display_size_and_bounds_allocation() {
+        assert_eq!(
+            RasterSize::for_display(400.0, 2400.0, 1.0),
+            RasterSize {
+                width: 400,
+                height: 2400
+            }
+        );
+        assert_eq!(
+            RasterSize::for_display(400.0, 2400.0, 2.0),
+            RasterSize {
+                width: 800,
+                height: 4800
+            }
+        );
         for (width, height) in [(12000.0, 12000.0), (400.0, 12000.0), (12000.0, 400.0)] {
-            let scale = raster_scale(width, height);
-            assert!(width * scale <= 4096.0);
-            assert!(height * scale <= 8192.0);
-            assert!(width * height * scale * scale <= 16_777_218.0);
+            let size = RasterSize::for_display(width, height, 2.0);
+            assert!(size.width <= 4096);
+            assert!(size.height <= 8192);
+            assert!(size.bytes() <= 64 * 1024 * 1024);
         }
+    }
+
+    #[gpui::test]
+    fn requested_canvas_is_actually_decoded_at_display_resolution(cx: &mut gpui::TestAppContext) {
+        let diagram = render(&DiagramKey {
+            source: "flowchart LR\n A[开始] --> B[结束]".into(),
+            dark: false,
+        })
+        .unwrap();
+        let (width, height) = diagram.display_size(300.0, None);
+        let size = RasterSize::for_display(width, height, 1.5);
+        let image = cx.update(|cx| {
+            diagram
+                .image_at_size(size)
+                .to_image_data(cx.svg_renderer())
+                .unwrap()
+        });
+        assert_eq!(image.as_bytes(0).unwrap().len(), size.bytes());
+        assert_eq!(image.size(0).width.0 as u32, size.width);
+        assert_eq!(image.size(0).height.0 as u32, size.height);
     }
 
     #[test]
