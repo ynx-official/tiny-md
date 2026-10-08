@@ -138,7 +138,7 @@ impl TinyMd {
         .detach();
     }
 
-    pub(crate) fn sidebar_panel(&self, cx: &mut Context<Self>) -> Div {
+    pub(crate) fn sidebar_panel(&self, window: &Window, cx: &mut Context<Self>) -> Stateful<Div> {
         let background = rgb(if self.dark { 0x1e2024 } else { 0xf9f9f9 });
         let ink = rgb(if self.dark { 0xe4e6e9 } else { 0x4b4b4b });
         let muted = rgb(if self.dark { 0x989ea7 } else { 0x999999 });
@@ -311,6 +311,7 @@ impl TinyMd {
                 let weak = view.clone();
                 let row = div()
                     .id(("document-entry", i))
+                    .debug_selector(move || format!("document-entry-{i}"))
                     .px_4()
                     .py_3()
                     .w_full()
@@ -437,9 +438,12 @@ impl TinyMd {
             );
         }
         div()
+            .id("sidebar-panel")
+            .debug_selector(|| "sidebar-panel".into())
+            .relative()
             .flex()
             .flex_col()
-            .w(px(250.0))
+            .w(self.sidebar_sizing.width(window.viewport_size().width))
             .flex_shrink_0()
             .bg(background)
             .border_r_1()
@@ -533,6 +537,7 @@ impl TinyMd {
                         ),
                 )
             })
+            .child(self.sidebar_resize_handle(cx))
     }
 
     pub(crate) fn formatting_toolbar(&self, cx: &mut Context<Self>) -> Div {

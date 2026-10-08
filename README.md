@@ -1,9 +1,40 @@
-# tiny-md
+# Tiny MD
 
-使用 Rust、GPUI、GPUI Component 和 Guise 构建的原生 Markdown 写作应用。
-支持 macOS 与 Windows x64 的原生写作界面。
+Tiny MD 是一款简洁的原生 Markdown 编辑器，适合日常笔记、技术文档和长文写作。
+它把编辑与排版预览放在同一个界面中：输入 Markdown 即可看到排版效果，也可以随时切换到源码模式，
+两个模式共享编辑内容与撤销历史。文档以本机 Markdown 文件保存，方便用其他编辑器继续处理。
 
-## 运行
+应用使用 Rust、GPUI、GPUI Component 和 Guise 构建，提供 Windows x64 与 macOS 原生界面，
+采用 [MIT 许可证](LICENSE) 开源。
+
+## 主要特色
+
+- **专注写作**：居中正文、按需展开的侧栏与排版工具栏，支持深浅主题、专注模式和打字机模式。
+- **即时排版与源码编辑**：支持标题、列表、任务列表、引用、链接和代码块，切换模式时保留撤销历史。
+- **表格与流程图**：直接编辑 Markdown 表格；预览 Mermaid 流程图，并在独立窗口中缩放、拖动查看。
+- **文档管理与导航**：文档列表、目录树、大纲、查找替换和独立窗口，便于整理与浏览本机文档。
+- **文件修改保护**：保存前检查磁盘变化，自动合并不重叠的修改；遇到冲突或保存失败时保留编辑内容。
+- **应用内更新**：查看版本日志、检查并下载更新，安装前处理未保存文档。
+
+图片内嵌预览、导出 / 打印、自动保存与崩溃恢复等能力尚未实现，完整范围见下方“尚待实现”。
+
+## 下载与开始使用
+
+从 [GitHub Releases](https://github.com/ynx-official/tiny-md/releases/latest) 下载对应平台的发行包：
+
+| 平台 | 安装方式 |
+|---|---|
+| Windows x64 | 下载 setup EXE 安装，或解压便携 ZIP 后运行 `tiny-md.exe` |
+| macOS Apple Silicon（arm64） | 下载 DMG，将 `Tiny MD.app` 拖入 Applications；也提供便携 ZIP |
+
+启动后可新建文档开始写作，也可以从“文件”菜单打开已有 Markdown 文件。
+从 v0.2.1 开始支持将 Markdown 文件拖入窗口，并为 Windows 安装增加右键入口和默认打开勾选项；
+Windows 默认应用仍需在系统设置中确认，说明见 [拖放与文件集成](docs/05-operations/windows-shell-integration.md)。
+使用 Ctrl+S（Windows）或 ⌘S（macOS）保存；侧栏和大纲可从“视图 / 显示”菜单打开。
+
+[变更日志](CHANGELOG.md) · [版本总览](docs/06-delivery/versions/index.md) · [文档索引](docs/README.md)
+
+## 从源码运行
 
 需要 Rust stable 和 macOS Command Line Tools。
 GPUI 已启用 `runtime_shaders`，运行时由 Metal 编译着色器，构建不需要额外安装完整 Xcode。
@@ -41,7 +72,10 @@ Windows 无文件启动时显示空白文档，布局按提供的 Typora 参考�
 macOS 打包脚本会复制 `.icns` 并设置 `CFBundleIconFile`；Windows 构建脚本会将
 多尺寸 `.ico` 嵌入 `tiny-md.exe`，需要 Windows SDK 的 `rc.exe` 或 GNU `windres`。
 Windows 图标资源、快捷键和文件操作已通过本机自动检查；原生交互仍待验收。
-在 macOS 上运行 `sh scripts/build-icons.sh` 可从源图重新导出 PNG、ICNS 和 ICO。
+Windows 使用收紧留白的独立图标，macOS 使用去掉外框的满画布素材。
+PowerShell 7.2+ 运行 `./scripts/build-icons.ps1` 可从母图重新导出 PNG、ICNS 和 ICO；
+macOS 运行 `sh scripts/build-icons.sh` 可从已适配的平台素材导出 ICNS 和 ICO。
+像素约束、消费路径与验证边界见 [应用图标说明](docs/02-design/application-icons.md)。
 macOS 启动时也会加载程序内嵌的 `.icns`，因此 `cargo run` 直接运行时会显示相同的 Dock 图标。
 
 ## 当前能力
@@ -52,7 +86,7 @@ macOS 启动时也会加载程序内嵌的 `.icns`，因此 `cargo run` 直接�
   发布清单、GitHub API 和发布页面按顺序查询，下载内容必须通过 SHA-256 校验。
   详见 [在线更新](docs/03-architecture/online-updates.md) 和 [变更日志](CHANGELOG.md)。
 
-- 简洁写作窗口、居中的正文，默认隐藏排版工具栏和侧栏；macOS 文档标题居中，Windows 应用标题位于左侧。
+- 简洁写作窗口、居中的正文，默认隐藏排版工具栏和侧栏；顶部文档文件名居中，Windows 应用标识位于左侧。
   文件、编辑、段落、格式、显示、主题、窗口和帮助操作使用 macOS 顶部原生菜单；
   Windows 使用窗口内菜单。
 - 文档列表 / 文档树支持右键菜单：打开、新窗口打开、新建、搜索、文件简介、重命名、
@@ -64,8 +98,9 @@ macOS 启动时也会加载程序内嵌的 `.icns`，因此 `cargo run` 直接�
   图片链接、引用和列表；“更多”向上展开，提供源码模式、插入段落、复制 / 粘贴、
   清除样式、删除块与隐藏工具栏。图片按钮目前插入 Markdown 链接，尚无内嵌图片预览。
 - 侧边栏有文档列表、文档树和大纲视图。列表显示 Markdown 文件、内容摘要和选中状态；
+  可拖动右侧分隔线连续调整宽度，切换视图和隐藏再打开时保留本窗口的调整结果；
   文档树递归显示当前文件夹，底部显示目录名称，可打开文件夹、刷新和切换文档；
-  大纲用于当前文档的标题导航。文档切换前检查未保存修改。
+  大纲用于当前文档的标题导航。打开笔记使用独立窗口，保留原窗口的内容和未保存修改。
 - 即时 Markdown 排版，正文所在行展开语法；标题标记保持隐藏，源码模式可直接编辑完整语法。
 - 段落、标题、强调、代码、链接、引用、列表、任务列表。
 - 代码块卡片、语言标签与复制按钮；进入代码块时展开围栏语法。
@@ -78,6 +113,8 @@ macOS 启动时也会加载程序内嵌的 `.icns`，因此 `cargo run` 直接�
   Tab / Shift+Tab 切换单元格，Enter 跳到下一行，末行自动新增可撤销的空行。
   原生“段落 → 表格”菜单支持行列增删和列对齐，结构操作一次撤销即可恢复。
 - 新建、独立窗口、打开、最近文件、保存、另存为、磁盘重新加载和 Finder 定位。
+  打开、最近文件及侧栏打开均为每篇笔记创建独立窗口，文件对话框支持多选；
+  详见 [文档窗口](docs/02-design/document-windows.md)。
   关闭只关闭当前窗口；退出逐个检查各窗口的未保存修改，取消或保存失败会停止退出。
 - 标题级别、引用、列表、代码块、表格、分割线、Front Matter、常用行内格式和行移动菜单。
 - 查找替换（区分大小写、循环跳转、全部替换可一次撤销）。
@@ -164,7 +201,7 @@ sh scripts/check.sh
 
 检查脚本还运行发布工具测试和当前版本资料校验，需要 Python 3.11+。
 首次使用在线更新需要手动安装一个包含该功能的新发行版；历史 `v0.1.0` 没有更新入口。
-当前版本为 **0.2.0**，改动与本次跳过测试的说明见 [版本详情](docs/06-delivery/versions/v0.2.0.md)。
+当前代码版本为 **0.2.1**，发布状态、改动与本次跳过测试的说明见 [版本详情](docs/06-delivery/versions/v0.2.1.md)。
 实际验证与平台验收边界见 [在线更新验证](docs/04-quality/online-updates.md)。
 
 ## 尚待实现
@@ -175,3 +212,11 @@ sh scripts/check.sh
 当前大纲只提取 ATX 标题；混合换行的文件在修改后保存时统一为 LF。
 外部修改采用父目录文件事件、定期字节核对与按行三方合并；同一行的重叠修改需要人工处理。
 机制及验收规则见 [外部文件同步](docs/02-design/external-file-sync.md)。
+
+## 许可证
+
+Tiny MD 采用 **MIT 许可证**，完整条款见 [LICENSE](LICENSE)。
+
+第三方依赖与改编代码保留各自的许可证和版权声明；Guise 编辑器适配说明见
+[第三方代码说明](crates/editor-adapter/THIRD_PARTY.md)，原始许可见
+[LICENSE.guise](crates/editor-adapter/LICENSE.guise)。

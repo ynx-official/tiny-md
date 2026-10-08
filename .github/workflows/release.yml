@@ -14,7 +14,7 @@ concurrency:
 
 env:
   # User-authorized exception for this release only; later tags run tests.
-  RELEASE_SKIP_TESTS: ${{ github.ref_name == 'v0.2.0' && 'true' || 'false' }}
+  RELEASE_SKIP_TESTS: ${{ github.ref_name == 'v0.2.1' && 'true' || 'false' }}
   CARGO_TERM_COLOR: always
   CARGO_BUILD_JOBS: 2
   CARGO_PROFILE_DEV_DEBUG: 0
@@ -171,17 +171,37 @@ jobs:
           RELEASE_VERSION: ${{ steps.version.outputs.version }}
         run: |
           $installer = (Resolve-Path "target/release-assets/tiny-md-v$env:RELEASE_VERSION-windows-x64-setup.exe").Path
-          $installDir = Join-Path $env:RUNNER_TEMP 'tiny-md-install-check'
+          $installDir = Join-Path $env:RUNNER_TEMP 'tiny-md-install-check 中文'
+          function Read-MarkdownDefaults {
+            $defaults = [ordered]@{}
+            foreach ($extension in @('.md', '.markdown')) {
+              $extensionKey = "Registry::HKEY_CURRENT_USER\Software\Classes\$extension"
+              $choiceKey = "Registry::HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\$extension\UserChoice"
+              $defaults[$extension] = if (Test-Path -LiteralPath $extensionKey) { (Get-Item -LiteralPath $extensionKey).GetValue('') } else { $null }
+              $defaults["$extension/choice"] = if (Test-Path -LiteralPath $choiceKey) { (Get-Item -LiteralPath $choiceKey).GetValue('ProgId') } else { $null }
+              $defaults["$extension/hash"] = if (Test-Path -LiteralPath $choiceKey) { (Get-Item -LiteralPath $choiceKey).GetValue('Hash') } else { $null }
+            }
+            return ($defaults | ConvertTo-Json -Compress)
+          }
+          $originalDefaults = Read-MarkdownDefaults
           $arguments = @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-', "/DIR=`"$installDir`"")
           $setup = Start-Process -FilePath $installer -ArgumentList $arguments -WindowStyle Hidden -Wait -PassThru
           if ($setup.ExitCode -ne 0) { throw "Installer failed: $($setup.ExitCode)" }
           $installed = Get-FileHash -LiteralPath "$installDir/tiny-md.exe"
           $built = Get-FileHash -LiteralPath 'target/x86_64-pc-windows-msvc/release/tiny-md.exe'
           if ($installed.Hash -ne $built.Hash) { throw 'Installed executable differs from the release build' }
+          ./scripts/verify-windows-shell.ps1 -InstallDir $installDir
+          # Reinstall with both opt-ins: silent updates must not open Settings or overwrite UserChoice.
+          $reinstall = Start-Process -FilePath $installer -ArgumentList ($arguments + '/TASKS=defaultmd,defaultmarkdown') -WindowStyle Hidden -Wait -PassThru
+          if ($reinstall.ExitCode -ne 0) { throw "Reinstall failed: $($reinstall.ExitCode)" }
+          ./scripts/verify-windows-shell.ps1 -InstallDir $installDir
+          if ((Read-MarkdownDefaults) -cne $originalDefaults) { throw 'Installation changed existing default applications' }
           $uninstaller = Get-ChildItem "$installDir/unins*.exe" | Select-Object -First 1
           if (!$uninstaller) { throw 'Uninstaller was not installed' }
           $remove = Start-Process -FilePath $uninstaller.FullName -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART' -WindowStyle Hidden -Wait -PassThru
           if ($remove.ExitCode -ne 0 -or (Test-Path "$installDir/tiny-md.exe")) { throw 'Uninstall verification failed' }
+          ./scripts/verify-windows-shell.ps1 -InstallDir $installDir -Uninstalled
+          if ((Read-MarkdownDefaults) -cne $originalDefaults) { throw 'Uninstall changed another application default' }
 
       - name: Verify Windows portable update helper
         if: matrix.platform == 'windows' && env.RELEASE_SKIP_TESTS != 'true'

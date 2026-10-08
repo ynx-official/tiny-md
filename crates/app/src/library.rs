@@ -26,7 +26,7 @@ pub fn summary(text: &str) -> String {
         .collect()
 }
 
-fn markdown(path: &Path) -> bool {
+pub(crate) fn markdown(path: &Path) -> bool {
     path.extension().is_some_and(|extension| {
         ["md", "markdown", "mdown"]
             .iter()

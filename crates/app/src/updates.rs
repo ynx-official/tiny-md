@@ -1,7 +1,8 @@
 use gpui::{prelude::*, *};
 use gpui_component::{
-    Disableable, Root, Sizable, TitleBar,
+    ActiveTheme, Disableable, Root, Sizable, TitleBar,
     button::{Button, ButtonVariants},
+    text::{TextView, TextViewStyle},
 };
 use std::{
     sync::{
@@ -419,6 +420,40 @@ impl Render for UpdateCenter {
                 .filter(|n| !n.is_empty())
                 .unwrap_or_else(|| "检查更新后显示新版本日志；也可阅读当前版本日志。".into())
         };
+        let notes_style = TextViewStyle {
+            paragraph_gap: rems(0.65),
+            heading_base_font_size: px(13.0),
+            highlight_theme: cx.theme().highlight_theme.clone(),
+            is_dark: dark,
+            ..Default::default()
+        }
+        .heading_font_size(|level, _| {
+            px(match level {
+                1 => 20.0,
+                2 => 16.0,
+                3 => 14.0,
+                _ => 13.0,
+            })
+        })
+        .code_block(
+            StyleRefinement::default()
+                .bg(rgb(if dark { 0x2b2f35 } else { 0xf6f5f4 }))
+                .text_color(ink)
+                .text_size(px(12.0))
+                .rounded(px(3.0))
+                .p_3(),
+        );
+        // TextView captures the syntax theme when its keyed state is created.
+        // Keep separate states so switching themes also refreshes code colors.
+        let notes_view = TextView::markdown(
+            ("release-notes-markdown", usize::from(dark)),
+            notes,
+            window,
+            cx,
+        )
+        .style(notes_style)
+        .selectable(true)
+        .scrollable(true);
         let mut actions = div()
             .flex()
             .items_center()
@@ -602,11 +637,11 @@ impl Render for UpdateCenter {
                     .id("release-notes-body")
                     .flex_1()
                     .min_h_0()
-                    .overflow_y_scroll()
+                    .overflow_hidden()
                     .p_4()
                     .border_t_1()
                     .border_color(border)
-                    .child(notes),
+                    .child(notes_view),
             )
             .child(
                 div()

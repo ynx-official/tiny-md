@@ -31,7 +31,8 @@ Windows 10 兼容性尚待实际运行验收。
 
 编译后的开发程序为 `target/debug/tiny-md.exe`，Windows GUI 子系统避免双击时出现控制台。
 发行安装程序仍由 `scripts/bundle-windows.ps1` 构建，需要额外安装 Inno Setup 6；
-本轮环境尚未安装 Inno Setup 6，未生成新版本安装程序；已构建便携优化版并更新当前用户已有安装目录。
+系统尚未安装 Inno Setup 6；后续文件集成改动使用工作区内的便携编译器生成开发安装包，
+验证范围见 [拖放与 Windows 文件集成](windows-shell-integration.md)。此前的便携优化版曾更新当前用户已有安装目录。
 `-Portable` 无需 Inno Setup，生成可双击的静态 C 运行库优化版
 `target/windows/Tiny MD/tiny-md.exe`。打包前校验 x64 PE32+ 和 GUI 子系统，拒绝带控制台的程序。
 
@@ -78,6 +79,8 @@ macOS 的隐藏应用快捷键仅在 macOS 注册。
 顶部标题栏和菜单行总高度为 52 px；正文外层左右留白为 12 px、顶部为 16 px，宽屏下最大文档宽度为 1080 px。
 底栏源码按钮可启用 / 退出源代码模式，提示和选中状态跟随当前模式。
 无文件路径启动时显示空白文档，快速入门通过帮助菜单打开。
+打开笔记、最近文件及侧栏打开均创建独立文档窗口，原笔记和未保存内容保留；
+文件对话框支持多选。规则与验证范围见 [文档窗口](../02-design/document-windows.md)。
 菜单标题中的 F / E / P / O / V / T / H 分别对应 Alt+F / Alt+E / Alt+P / Alt+O / Alt+V / Alt+T / Alt+H。
 F10 也能打开文件菜单。下拉项目显示已有的实际快捷键，菜单方向键和 Escape 使用原有弹出菜单行为。
 Windows 标题栏显示文档名和未保存的 `•` 标记；标题间距已收紧，文档原有空行仍然保留。

@@ -40,13 +40,36 @@ PowerShell 发布、验证与助手脚本均已通过语法解析检查；Window
 
 - 本机未发现 Inno Setup 6 编译器，未构建或运行新的 Windows setup 安装包；CI 保留安装和卸载验证。
 - macOS 的 ZIP 签名、应用 bundle 替换与原生重启需要 macOS runner / 实机，当前 Windows 环境未执行。
-- 本轮未创建版本标签、推送、运行云端发布工作流或发布 GitHub Release。
+- 上述开发阶段未创建标签或运行云端发布；后续正式发布结果见下节。
 - 自动回归不等于真实系统窗口、输入法、首次安装权限和安装版重启已经验收。
 
-## v0.2.0 发布准备
+## v0.2.0 正式发布
 
 用户于 2026-10-08 明确授权正式发版并要求跳过测试。
 workspace 与四个锁文件包版本已统一为 `0.2.0`；版本详情、总览、CHANGELOG 日期与链接一致性校验通过。
 `cargo metadata --locked --offline --no-deps` 与格式检查通过，本次不重新运行上述开发阶段测试。
 CI 仅对 `v0.2.0` 跳过 Rust / Python、安装卸载和助手测试，保留格式 / Clippy、双平台构建和产物校验。
-正式发布结果以 [v0.2.0 版本详情](../06-delivery/versions/v0.2.0.md) 的发布后记录为准。
+[发布流水线](https://github.com/ynx-official/tiny-md/actions/runs/37755327430) 第 2 次运行成功，
+正式 Release 已于 2026-10-08 17:42:56（Asia/Shanghai）公开，7 个附件齐全。
+已核对更新清单、远端附件名称 / 大小 / digest、校验和及发布正文，并实际下载核验 3 个元数据文件。
+完整证据以 [v0.2.0 版本详情](../06-delivery/versions/v0.2.0.md) 为准；这不代表安装或原生交互已验收。
+
+## 未发布的 Markdown 日志与构建优化
+
+用户在 `v0.2.0` 标签推送后要求支持 Markdown 日志渲染和最高打包优化，并明确让本次发布继续。
+这两项只修改工作区，记录在 `Unreleased`，不改版本号或已推送标签，也不进入该标签的构建产物。
+当前版本与远端日志使用 GPUI Component TextView；浅色和深色分别保存渲染状态，以更新代码高亮颜色。
+
+2026-10-08 本机 Windows 最终源码的 `cargo fmt --all -- --check`、
+`cargo clippy --locked --workspace --all-targets -- -D warnings` 和最高优化 release 构建均通过。
+构建采用 `opt-level = 3`、fat LTO、单代码生成单元和静态 MSVC 运行库，
+`verify-windows-exe.ps1` 确认产物为 Windows x64 GUI 程序。完整编译耗时 14 分 13 秒，
+随后针对最终源码再次构建通过；此耗时只作为本次构建记录，不用于性能对比。
+按用户要求未运行测试，未验收原生日志界面、macOS 上的新配置或运行性能 / 包体变化。
+
+## v0.2.1 发布准备
+
+用户于 2026-10-08 再次要求开始发版并跳过测试，以上日志与构建优化及文件 / 窗口 / 图标改动纳入 `v0.2.1`。
+workspace 与四个锁文件包版本统一为 `0.2.1`，本次不运行 Rust / Python、安装卸载或更新助手测试。
+工作流只对本次新标签跳过测试，保留格式 / Clippy、实际双平台构建和发布完整性校验。
+最新运行与公开状态以 [v0.2.1 版本详情](../06-delivery/versions/v0.2.1.md) 为准。

@@ -18,9 +18,14 @@ mod assets;
 mod diagram_viewer;
 mod disk_sync;
 mod document_menu;
+#[cfg(test)]
+mod file_open_tests;
 mod library;
 mod menus;
 mod panels;
+mod sidebar_resize;
+#[cfg(test)]
+mod sidebar_resize_tests;
 mod updates;
 #[cfg(target_os = "windows")]
 mod windows_menu;
@@ -31,11 +36,16 @@ use windows_menu::WindowsMenuBar;
 
 const WELCOME: &str = include_str!("../../../fixtures/welcome.md");
 
+fn accepts_markdown_drop(paths: &[PathBuf]) -> bool {
+    !paths.is_empty() && paths.iter().all(|path| library::markdown(path))
+}
+
 #[derive(Clone)]
 enum Intent {
     New,
     Open,
     OpenPath(PathBuf),
+    Reload,
     CreateFile(PathBuf),
     Close,
     Quit,
@@ -201,6 +211,7 @@ struct TinyMd {
     source_mode: bool,
     sidebar: bool,
     sidebar_mode: SidebarMode,
+    sidebar_sizing: sidebar_resize::SidebarSizing,
     library_root: Option<PathBuf>,
     documents: Vec<library::Entry>,
     library_error: Option<String>,
@@ -294,7 +305,6 @@ impl TinyMd {
     }
 
     fn new(initial: Option<PathBuf>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let dark = cx.global::<Session>().dark;
         let (document, text, status, error) = match initial {
             Some(path) => match Document::open(&path) {
                 Ok((document, text)) => (document, text, "已打开".into(), false),
@@ -312,6 +322,18 @@ impl TinyMd {
                 false,
             ),
         };
+        Self::from_document(document, &text, status, error, window, cx)
+    }
+
+    fn from_document(
+        document: Document,
+        text: &str,
+        status: String,
+        error: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let dark = cx.global::<Session>().dark;
         if let Some(path) = document.path() {
             remember(path, cx);
         }
@@ -332,7 +354,7 @@ impl TinyMd {
         .detach();
         let editor = cx.new(|cx| {
             MarkdownEditor::new(cx)
-                .value(&text)
+                .value(text)
                 .font_size(16.0)
                 .placeholder("从一个想法开始……")
                 .style(editor_style(dark))
@@ -403,7 +425,7 @@ impl TinyMd {
             .and_then(Path::parent)
             .map(Path::to_path_buf);
         let mut analysis = TextAnalysis::default();
-        analysis.update(&text);
+        analysis.update(text);
         let mut this = Self {
             #[cfg(target_os = "windows")]
             menu_bar: None,
@@ -420,6 +442,7 @@ impl TinyMd {
             source_mode: false,
             sidebar: false,
             sidebar_mode: SidebarMode::Documents,
+            sidebar_sizing: sidebar_resize::SidebarSizing::default(),
             library_root,
             documents: vec![],
             library_error: None,
@@ -476,7 +499,9 @@ impl TinyMd {
             return;
         }
         self.finish_input(cx);
-        if !self.dirty {
+        // Opening another note never replaces this editor, so its unsaved
+        // changes require no decision. Reloading still uses the save guard.
+        if matches!(intent, Intent::Open | Intent::OpenPath(_)) || !self.dirty {
             self.execute(intent, window, cx);
             return;
         }
@@ -513,7 +538,12 @@ impl TinyMd {
         match intent {
             Intent::New => self.install(Document::untitled(""), "", window, cx),
             Intent::Open => self.open(window, cx),
-            Intent::OpenPath(path) => self.load_path(path, window, cx),
+            Intent::OpenPath(path) => self.open_paths(vec![path], window, cx),
+            Intent::Reload => {
+                if let Some(path) = self.document.path().map(Path::to_owned) {
+                    self.reload_path(path, window, cx);
+                }
+            }
             Intent::CreateFile(path) => self.create_library_file(path, window, cx),
             Intent::PrepareUpdate => {
                 if !cx.global::<Session>().updating {
@@ -568,7 +598,7 @@ impl TinyMd {
         self.refresh_documents(cx);
     }
 
-    fn load_path(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+    fn reload_path(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         self.set_busy(true, cx);
         let task = cx
             .background_executor()
@@ -591,27 +621,54 @@ impl TinyMd {
         let paths = cx.prompt_for_paths(PathPromptOptions {
             files: true,
             directories: false,
-            multiple: false,
+            multiple: true,
             prompt: Some("打开 Markdown 文档".into()),
         });
-        let executor = cx.background_executor().clone();
         cx.spawn_in(window, async move |this, cx| {
-            let loaded = match paths.await {
-                Ok(Ok(Some(paths))) => match paths.into_iter().next() {
-                    Some(path) => Some(executor.spawn(async move { Document::open(&path) }).await),
-                    None => None,
-                },
-                Ok(Ok(None)) => None,
-                Ok(Err(e)) => Some(Err(std::io::Error::other(e.to_string()))),
-                Err(e) => Some(Err(std::io::Error::other(e.to_string()))),
-            };
+            let paths = paths.await;
             let _ = this.update_in(cx, |this, window, cx| {
                 this.set_busy(false, cx);
                 this.editor.read(cx).focus_handle().focus(window);
-                match loaded {
-                    Some(Ok((document, text))) => this.install(document, &text, window, cx),
-                    Some(Err(e)) => this.fail(format!("打开失败：{e}"), cx),
-                    None => {}
+                match paths {
+                    Ok(Ok(Some(paths))) => this.open_paths(paths, window, cx),
+                    Ok(Err(e)) => this.fail(format!("打开失败：{e}"), cx),
+                    Err(e) => this.fail(format!("打开失败：{e}"), cx),
+                    Ok(Ok(None)) => {}
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn open_paths(&mut self, paths: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
+        if paths.is_empty() {
+            return;
+        }
+        self.set_busy(true, cx);
+        let task = cx.background_executor().spawn(async move {
+            paths
+                .into_iter()
+                .map(|path| {
+                    let loaded = Document::open(&path);
+                    (path, loaded)
+                })
+                .collect::<Vec<_>>()
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let loaded = task.await;
+            let _ = this.update_in(cx, |this, _, cx| {
+                this.set_busy(false, cx);
+                let mut errors = vec![];
+                for (path, result) in loaded {
+                    match result {
+                        Ok((document, text)) => {
+                            open_document_window(document, text, this.library_root.clone(), cx);
+                        }
+                        Err(error) => errors.push(format!("{}：{error}", path.display())),
+                    }
+                }
+                if !errors.is_empty() {
+                    this.fail(format!("打开失败：{}", errors.join("；")), cx);
                 }
             });
         })
@@ -946,14 +1003,15 @@ fn about(window: &mut Window, cx: &mut App) {
 
 impl Render for TinyMd {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let document_title = self.document.title();
         let window_title = if cfg!(target_os = "windows") {
             format!(
                 "{}{} — Tiny MD",
-                self.document.title(),
+                document_title,
                 if self.dirty { " •" } else { "" }
             )
         } else {
-            self.document.title()
+            document_title.clone()
         };
         window.set_window_title(&window_title);
         window.set_window_edited(self.dirty);
@@ -1012,19 +1070,29 @@ impl Render for TinyMd {
         } else {
             surface
         };
+        // TitleBar adds a 0.75 rem inset to its content in fullscreen mode.
+        let title_inset = if window.is_fullscreen() {
+            rems(0.75).to_pixels(window.rem_size())
+        } else {
+            px(0.0)
+        };
         let titlebar = TitleBar::new()
             .bg(title_surface)
             .border_b_0()
-            .when(cfg!(target_os = "windows"), |bar| bar.h(px(28.0)))
+            .when(cfg!(target_os = "windows"), |bar| bar.h(px(28.0)).pl_0())
             .when(cfg!(target_os = "macos"), |bar| bar.pr(px(80.0)))
             .child(
                 div()
+                    .relative()
                     .flex()
                     .flex_1()
                     .min_w_0()
                     .overflow_hidden()
-                    .when(cfg!(target_os = "windows"), |title| title.pr_3().gap_2())
-                    .when(!cfg!(target_os = "windows"), |title| title.justify_center())
+                    .when(cfg!(target_os = "windows"), |title| {
+                        // Match the three fixed-width controls on the right so
+                        // the filename stays at the center of the whole window.
+                        title.pl(gpui_component::TITLE_BAR_HEIGHT * 3.0 - title_inset)
+                    })
                     .items_center()
                     .text_size(px(13.0))
                     .font_weight(FontWeight::MEDIUM)
@@ -1034,11 +1102,38 @@ impl Render for TinyMd {
                         muted
                     })
                     .when(cfg!(target_os = "windows"), |title| {
-                        title.child(img("app/window-icon.png").size(px(16.0)).flex_shrink_0())
+                        title.child(
+                            div()
+                                .absolute()
+                                .left(px(12.0) - title_inset)
+                                .top_0()
+                                .h_full()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .child(img("app/window-icon.png").size(px(16.0)).flex_shrink_0())
+                                .child("Tiny MD"),
+                        )
                     })
-                    .child(div().min_w_0().text_ellipsis().child(window_title)),
+                    .child(
+                        div()
+                            .id("document-window-title")
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .gap_1()
+                            .child(div().min_w_0().text_ellipsis().child(document_title))
+                            .when(cfg!(target_os = "windows") && self.dirty, |title| {
+                                title.child(div().flex_shrink_0().child("•"))
+                            }),
+                    ),
             );
-        let sidebar = self.sidebar_panel(cx);
+        if !self.sidebar || self.focus_mode || !window.is_window_active() {
+            self.sidebar_sizing.finish();
+        }
+        let sidebar = self.sidebar_panel(window, cx);
         let mut search = div()
             .flex()
             .flex_col()
@@ -1116,6 +1211,8 @@ impl Render for TinyMd {
             .when(self.sidebar && !self.focus_mode, |body| body.child(sidebar))
             .child(
                 div()
+                    .id("document-editor-pane")
+                    .debug_selector(|| "document-editor-pane".into())
                     .flex()
                     .flex_1()
                     .relative()
@@ -1245,6 +1342,8 @@ impl Render for TinyMd {
                         self.characters
                     )),
             );
+        let drop_enabled =
+            !self.busy && !cx.global::<Session>().updating && !cx.global::<Session>().quitting;
         let mut root = div()
             .id("tiny-md")
             .key_context("TinyMd")
@@ -1254,6 +1353,23 @@ impl Render for TinyMd {
             .font_family(ui_font())
             .bg(surface)
             .text_color(ink)
+            .can_drop(move |value, _, _| {
+                drop_enabled
+                    && value
+                        .downcast_ref::<ExternalPaths>()
+                        .is_some_and(|paths| accepts_markdown_drop(paths.paths()))
+            })
+            .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
+                if this.busy || cx.global::<Session>().updating || cx.global::<Session>().quitting {
+                    return;
+                }
+                if accepts_markdown_drop(paths.paths()) {
+                    cx.global_mut::<Session>().current = Some(window.window_handle().window_id());
+                    this.finish_input(cx);
+                    // Reuse Open's new-window flow, preserving the current note.
+                    this.open_paths(paths.paths().to_vec(), window, cx);
+                }
+            }))
             .capture_any_mouse_down(cx.listener(|_, _, window, cx| {
                 cx.global_mut::<Session>().current = Some(window.window_handle().window_id());
                 cx.notify();
@@ -1273,8 +1389,8 @@ impl Render for TinyMd {
             )
             .on_action(cx.listener(|_, _: &QuitApplication, _, cx| quit(cx)))
             .on_action(cx.listener(|this, _: &ReloadDocument, w, cx| {
-                if let Some(path) = this.document.path().map(Path::to_owned) {
-                    this.request(Intent::OpenPath(path), w, cx);
+                if this.document.path().is_some() {
+                    this.request(Intent::Reload, w, cx);
                 }
             }))
             .on_action(cx.listener(|this, _: &RevealDocument, _, cx| {
@@ -1444,6 +1560,48 @@ impl Render for TinyMd {
 }
 
 fn open_editor_window(initial: Option<PathBuf>, empty: bool, cx: &mut App) {
+    create_editor_window(
+        move |window, cx| {
+            let mut view = TinyMd::new(initial, window, cx);
+            if empty {
+                view.install(Document::untitled(""), "", window, cx);
+            }
+            view
+        },
+        cx,
+    );
+}
+
+fn open_document_window(
+    document: Document,
+    text: String,
+    library_root: Option<PathBuf>,
+    cx: &mut App,
+) {
+    create_editor_window(
+        move |window, cx| {
+            let mut view =
+                TinyMd::from_document(document, &text, "已打开".into(), false, window, cx);
+            // A note opened from a nested folder keeps the same library scope.
+            if let Some(root) = library_root
+                && view
+                    .document
+                    .path()
+                    .is_some_and(|path| path.starts_with(&root))
+            {
+                view.library_root = Some(root);
+                view.refresh_documents(cx);
+            }
+            view
+        },
+        cx,
+    );
+}
+
+fn create_editor_window(
+    create: impl FnOnce(&mut Window, &mut Context<TinyMd>) -> TinyMd,
+    cx: &mut App,
+) {
     if cx.global::<Session>().updating {
         return;
     }
@@ -1456,13 +1614,7 @@ fn open_editor_window(initial: Option<PathBuf>, empty: bool, cx: &mut App) {
             ..Default::default()
         },
         |window, cx| {
-            let view = cx.new(|cx| {
-                let mut view = TinyMd::new(initial, window, cx);
-                if empty {
-                    view.install(Document::untitled(""), "", window, cx);
-                }
-                view
-            });
+            let view = cx.new(|cx| create(window, cx));
             cx.global_mut::<Session>()
                 .windows
                 .push((window.window_handle(), view.downgrade()));

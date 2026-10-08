@@ -4,6 +4,35 @@
 - 最后更新：2026-10-08
 - 关联文档：[文档索引](README.md)、[Windows 说明](05-operations/windows.md)
 
+## 每篇笔记独立窗口（2026-10-08）
+
+- 用户要求及打开规则见 [文档窗口](02-design/document-windows.md)。普通打开、最近文件和侧栏 / 右键打开改为独立窗口，文件对话框允许多选；重新加载单独使用当前窗口。
+- 修复前四项回归实际失败：普通打开、最近文件及右键打开只保留一个窗口；有未保存文本时弹出保存提示。
+- `cargo test --locked -p tiny-md file_open_tests`：8 项回归全部通过，覆盖原文档路径与正文保留、未保存内容与撤销、侧栏点击及目录范围、批量打开的部分失败、关闭取消 / 放弃、空选择和重新加载保护。
+- `cargo fmt --all -- --check`、`cargo clippy --locked -p tiny-md --all-targets -- -D warnings`、`cargo build --locked -p tiny-md` 通过；开发版 `target/debug/tiny-md.exe` 通过 x64 Windows GUI 子系统及嵌入图标校验。
+- `./scripts/check.ps1` 的发布工具 17 项测试、当前版本资料和格式检查通过；末次应用测试为 26 项通过、2 项失败，失败属于同时修改中的侧栏隐藏与拖动边界测试，因此不声明完整脚本通过。
+- 本次只构建开发版，未替换本机安装程序或发布版本。GPUI TestPlatform 事件测试不能替代 Windows / macOS 原生多选对话框、窗口焦点和系统关闭交互验收。
+
+## 侧边栏拖动调宽（2026-10-08）
+
+- 新增鼠标事件回归先确认三项失败：拖宽、隐藏恢复与拖窄后仍为固定 250 px。
+- 接入右侧调整入口后，四项 GPUI TestPlatform 回归通过，覆盖连续宽度、三种视图共享、
+  隐藏 / 专注模式恢复、窗口缩小与扩大、宽度上下限、右键防穿透、松开 / 失焦 / 隐藏时结束拖动，
+  以及未保存内容、焦点和撤销历史保留。交互规则见 [UI 风格](02-design/ui-style.md)。
+- `./scripts/check.ps1` 通过：17 项 Python 发布工具测试、当前版本资料校验、Rust 格式检查、
+  128 项工作区测试（应用 29、文档 16、编辑器 71、更新器 12）和 Clippy；原有一个 doctest 忽略。
+- `cargo build --locked -p tiny-md` 成功生成 `target/debug/tiny-md.exe`；diff 检查通过。
+- 本轮未执行 Windows 原生鼠标 / 光标与深浅主题的实机验收，也未构建或安装新的发布包。
+  TestPlatform 事件与布局验证不替代真实系统交互验收；改动归入 `Unreleased`。
+
+## 顶部文档文件名居中（2026-10-08）
+
+- 用户确认调整的是窗口顶部的文章文件名；布局规则见 [UI 风格](02-design/ui-style.md)。
+- 根据 GPUI Component 0.5.0 的窗口按钮宽度和全屏内边距，为 Windows 文件名保留对称空间；
+  长文件名截断与未保存标记分开渲染，保留左侧应用标识和已有标题栏控件。
+- `cargo fmt --all -- --check`、`cargo clippy --locked -p tiny-md --all-targets -- -D warnings` 和 diff 检查通过。
+- 本轮未运行测试、构建新的发布安装包或执行原生窗口验收；改动归入 `Unreleased`。
+
 ## 长文档性能优化自动回归（2026-10-08）
 
 - 五项实现与具体工作量见 [渲染性能优化](04-quality/render-performance-optimization.md)，

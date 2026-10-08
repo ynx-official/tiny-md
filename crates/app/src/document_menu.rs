@@ -542,3 +542,36 @@ impl TinyMd {
         .detach();
     }
 }
+
+#[cfg(test)]
+mod file_open_tests {
+    use super::*;
+    use crate::file_open_tests::{assert_opened, init, note};
+    use core::prelude::v1::test;
+
+    #[gpui::test]
+    fn document_menu_open_creates_a_window(cx: &mut TestAppContext) {
+        init(cx);
+        let directory = tempfile::tempdir().unwrap();
+        let first = note(directory.path(), "first.md", "First note");
+        let second = note(directory.path(), "second.md", "Second note");
+        let (view, cx) =
+            cx.add_window_view(|window, cx| TinyMd::new(Some(first.clone()), window, cx));
+        cx.update(|window, cx| {
+            view.update(cx, |this, cx| {
+                this.document_command(
+                    DocumentCommand::Open,
+                    Some(second.clone()),
+                    false,
+                    window,
+                    cx,
+                );
+            });
+        });
+        cx.run_until_parked();
+        cx.read(|cx| {
+            assert_opened(cx, &second, "Second note");
+            assert_eq!(view.read(cx).document.path(), Some(first.as_path()));
+        });
+    }
+}
