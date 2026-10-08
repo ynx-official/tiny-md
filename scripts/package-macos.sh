@@ -19,4 +19,8 @@ mkdir -p target/release-assets
 image="target/release-assets/tiny-md-v${version}-macos-arm64.dmg"
 hdiutil create -volname "Tiny MD $version" -srcfolder "$stage" -ov -format UDZO "$image"
 hdiutil verify "$image"
+archive="target/release-assets/tiny-md-v${version}-macos-arm64-portable.zip"
+ditto -c -k --norsrc --keepParent "$stage/Tiny MD.app" "$archive"
+unzip -t "$archive"
 printf 'Built: %s\n' "$image"
+printf 'Built update archive: %s\n' "$archive"

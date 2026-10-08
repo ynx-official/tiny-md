@@ -11,6 +11,7 @@ gpui-component.workspace = true
 guise.workspace = true
 tiny-md-editor.workspace = true
 tiny-md-document.workspace = true
+tiny-md-updater.workspace = true
 trash = "=5.2.9"
 
 [dev-dependencies]

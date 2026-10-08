@@ -20,13 +20,17 @@ while [ "$#" -gt 0 ]; do
     esac
     shift
 done
-if [ -z "$version" ]; then
-    version=$(cargo pkgid -p tiny-md | sed 's/.*[@#]//')
-fi
-if ! printf '%s\n' "$version" | LC_ALL=C grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
-    printf 'Invalid bundle version: %s (expected X.Y.Z)\n' "$version" >&2
+package_version=$(cargo pkgid -p tiny-md | sed 's/.*[@#]//')
+if [ -z "$version" ]; then version="$package_version"; fi
+if [ "$version" != "$package_version" ]; then
+    printf 'Bundle version %s does not match Cargo version %s\n' "$version" "$package_version" >&2
     exit 1
 fi
+if ! printf '%s\n' "$version" | LC_ALL=C grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.+-]+)?$'; then
+    printf 'Invalid bundle version: %s (expected SemVer)\n' "$version" >&2
+    exit 1
+fi
+core_version="${version%%[-+]*}"
 if [ "$profile" = release ]; then
     cargo build --locked --release -p tiny-md
     bundle="$(pwd)/target/release/Tiny MD.app"
@@ -47,8 +51,8 @@ cat > "$bundle/Contents/Info.plist" <<PLIST
 <key>CFBundleExecutable</key><string>tiny-md</string>
 <key>CFBundleIconFile</key><string>tiny-md.icns</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>$version</string>
-<key>CFBundleVersion</key><string>$version</string>
+<key>CFBundleShortVersionString</key><string>$core_version</string>
+<key>CFBundleVersion</key><string>$core_version</string>
 <key>NSHighResolutionCapable</key><true/>
 <key>LSMinimumSystemVersion</key><string>11.0</string>
 </dict></plist>

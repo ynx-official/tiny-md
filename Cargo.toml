@@ -1,10 +1,10 @@
 [workspace]
-members = ["crates/app", "crates/editor-adapter", "crates/document"]
+members = ["crates/app", "crates/editor-adapter", "crates/document", "crates/updater"]
 default-members = ["crates/app"]
 resolver = "2"
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 license = "MIT"
 publish = false
@@ -15,6 +15,7 @@ gpui-component = { version = "=0.5.0", default-features = false }
 guise = { package = "guise-ui", version = "=1.9.1", default-features = false }
 tiny-md-editor = { path = "crates/editor-adapter" }
 tiny-md-document = { path = "crates/document" }
+tiny-md-updater = { path = "crates/updater" }
 
 [profile.dev]
 debug = 1

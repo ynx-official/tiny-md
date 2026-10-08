@@ -13,6 +13,8 @@ concurrency:
   cancel-in-progress: false
 
 env:
+  # User-authorized exception for this release only; later tags run tests.
+  RELEASE_SKIP_TESTS: ${{ github.ref_name == 'v0.2.0' && 'true' || 'false' }}
   CARGO_TERM_COLOR: always
   CARGO_BUILD_JOBS: 2
   CARGO_PROFILE_DEV_DEBUG: 0
@@ -20,8 +22,32 @@ env:
   CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: -C target-feature=+crt-static
 
 jobs:
+  validate:
+    name: Validate release metadata
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.13'
+      - name: Test release tools
+        if: env.RELEASE_SKIP_TESTS != 'true'
+        run: python -B -m unittest discover -s scripts -p 'test_*.py'
+
+      - name: Validate release metadata
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          python -B scripts/release_notes.py --tag "$RELEASE_TAG"
+
   build:
     name: Build ${{ matrix.platform }} (${{ matrix.arch }})
+    needs: validate
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 120
     strategy:
@@ -54,6 +80,11 @@ jobs:
           core="${version%%[-+]*}"
           printf 'version=%s\ncore=%s\n' "$version" "$core" >> "$GITHUB_OUTPUT"
 
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.13'
+
       - name: Set up Rust
         shell: bash
         run: |
@@ -84,8 +115,14 @@ jobs:
           key: release-${{ matrix.platform }}-${{ matrix.arch }}
 
       - name: Check formatting, tests and Clippy
-        if: matrix.platform == 'macos'
+        if: matrix.platform == 'macos' && env.RELEASE_SKIP_TESTS != 'true'
         run: sh scripts/check.sh
+
+      - name: Check macOS formatting and Clippy without tests
+        if: matrix.platform == 'macos' && env.RELEASE_SKIP_TESTS == 'true'
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy --locked --workspace --all-targets -- -D warnings
 
       - name: Check Windows formatting, tests and Clippy
         if: matrix.platform == 'windows'
@@ -93,15 +130,19 @@ jobs:
         run: |
           cargo fmt --all -- --check
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo test --locked --workspace --target x86_64-pc-windows-msvc
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ($env:RELEASE_SKIP_TESTS -ne 'true') {
+            cargo test --locked --workspace --target x86_64-pc-windows-msvc
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          } else {
+            Write-Output 'Rust tests skipped for this user-authorized release'
+          }
           cargo clippy --locked --workspace --all-targets --target x86_64-pc-windows-msvc -- -D warnings
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Build macOS release application
         if: matrix.platform == 'macos'
         env:
-          BUNDLE_VERSION: ${{ steps.version.outputs.core }}
+          BUNDLE_VERSION: ${{ steps.version.outputs.version }}
         run: sh scripts/bundle-macos.sh --release --version "$BUNDLE_VERSION"
 
       - name: Package and verify macOS application
@@ -124,7 +165,7 @@ jobs:
         run: ./scripts/bundle-windows.ps1 -Version $env:RELEASE_VERSION
 
       - name: Verify Windows install and uninstall
-        if: matrix.platform == 'windows'
+        if: matrix.platform == 'windows' && env.RELEASE_SKIP_TESTS != 'true'
         shell: pwsh
         env:
           RELEASE_VERSION: ${{ steps.version.outputs.version }}
@@ -132,23 +173,27 @@ jobs:
           $installer = (Resolve-Path "target/release-assets/tiny-md-v$env:RELEASE_VERSION-windows-x64-setup.exe").Path
           $installDir = Join-Path $env:RUNNER_TEMP 'tiny-md-install-check'
           $arguments = @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-', "/DIR=`"$installDir`"")
-          $setup = Start-Process -FilePath $installer -ArgumentList $arguments -Wait -PassThru
+          $setup = Start-Process -FilePath $installer -ArgumentList $arguments -WindowStyle Hidden -Wait -PassThru
           if ($setup.ExitCode -ne 0) { throw "Installer failed: $($setup.ExitCode)" }
           $installed = Get-FileHash -LiteralPath "$installDir/tiny-md.exe"
           $built = Get-FileHash -LiteralPath 'target/x86_64-pc-windows-msvc/release/tiny-md.exe'
           if ($installed.Hash -ne $built.Hash) { throw 'Installed executable differs from the release build' }
           $uninstaller = Get-ChildItem "$installDir/unins*.exe" | Select-Object -First 1
           if (!$uninstaller) { throw 'Uninstaller was not installed' }
-          $remove = Start-Process -FilePath $uninstaller.FullName -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART' -Wait -PassThru
+          $remove = Start-Process -FilePath $uninstaller.FullName -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART' -WindowStyle Hidden -Wait -PassThru
           if ($remove.ExitCode -ne 0 -or (Test-Path "$installDir/tiny-md.exe")) { throw 'Uninstall verification failed' }
+
+      - name: Verify Windows portable update helper
+        if: matrix.platform == 'windows' && env.RELEASE_SKIP_TESTS != 'true'
+        shell: pwsh
+        run: ./scripts/test-windows-update.ps1
 
       - name: Upload installer
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: release-${{ matrix.platform }}-${{ matrix.arch }}
           path: |
-            target/release-assets/*.dmg
-            target/release-assets/*.exe
+            target/release-assets/tiny-md-v${{ steps.version.outputs.version }}-${{ matrix.platform }}-${{ matrix.arch }}*
           if-no-files-found: error
           compression-level: 0
           retention-days: 14
@@ -161,6 +206,16 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Check out tagged release scripts
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.13'
+
       - name: Download installers
         uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
@@ -168,27 +223,27 @@ jobs:
           path: release-assets
           merge-multiple: true
 
+      - name: Generate user release notes and update manifest
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_REPOSITORY: ${{ github.repository }}
+        run: |
+          python -B scripts/release_notes.py --tag "$RELEASE_TAG" --output release-assets/release-notes.md
+          python -B scripts/update_manifest.py --dist release-assets --tag "$RELEASE_TAG" --repository "$RELEASE_REPOSITORY" --output release-assets/update-manifest.json
+
       - name: Generate checksums
         working-directory: release-assets
         run: |
           test "$(find . -maxdepth 1 -name '*.dmg' | wc -l)" -eq 1
           test "$(find . -maxdepth 1 -name '*.exe' | wc -l)" -eq 1
-          sha256sum ./*.dmg ./*.exe > SHA256SUMS
+          test "$(find . -maxdepth 1 -name '*.zip' | wc -l)" -eq 2
+          sha256sum tiny-md-*.dmg tiny-md-*.exe tiny-md-*.zip release-notes.md update-manifest.json > SHA256SUMS
           sha256sum --check SHA256SUMS
 
-      - name: Create release and upload assets
+      - name: Upload all draft assets and publish
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
-          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            gh release upload "$RELEASE_TAG" release-assets/*.dmg release-assets/*.exe release-assets/SHA256SUMS --clobber
-          else
-            flags=()
-            if [[ "${RELEASE_TAG%%+*}" == *-* ]]; then
-              flags+=(--prerelease)
-            fi
-            gh release create "$RELEASE_TAG" release-assets/*.dmg release-assets/*.exe release-assets/SHA256SUMS \
-              --verify-tag --title "Tiny MD $RELEASE_TAG" --generate-notes "${flags[@]}"
-          fi
+          python -B scripts/publish_release.py --tag "$RELEASE_TAG" --assets release-assets

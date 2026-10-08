@@ -7,11 +7,11 @@ $ErrorActionPreference = 'Stop'
 Set-Location (Join-Path $PSScriptRoot '..')
 . (Join-Path $PSScriptRoot 'setup-windows.ps1')
 
-if (!$Version) {
-    $package = cargo pkgid -p tiny-md
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-    $Version = ($package -split '[@#]')[-1]
-}
+$package = cargo pkgid -p tiny-md
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+$packageVersion = ($package -split '[@#]')[-1]
+if (!$Version) { $Version = $packageVersion }
+if ($Version -ne $packageVersion) { throw "Bundle version $Version does not match Cargo version $packageVersion" }
 if ($Version -notmatch '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$') {
     throw "Invalid version: $Version (expected X.Y.Z or X.Y.Z-beta.1)"
 }
@@ -30,8 +30,11 @@ New-Item -ItemType Directory -Force -Path $bundle, 'target/release-assets' | Out
 Copy-Item -LiteralPath $executable -Destination "$bundle/tiny-md.exe" -Force
 Copy-Item -LiteralPath 'fixtures/welcome.md' -Destination "$bundle/welcome.md" -Force
 Set-Content -LiteralPath "$bundle/version.txt" -Value $Version -Encoding utf8
+$portableArchive = "target/release-assets/tiny-md-v$Version-windows-x64-portable.zip"
+Compress-Archive -LiteralPath "$bundle/tiny-md.exe", "$bundle/version.txt", "$bundle/welcome.md" -DestinationPath $portableArchive -Force
 if ($Portable) {
     Write-Output "Built portable app: $((Resolve-Path -LiteralPath "$bundle/tiny-md.exe").Path)"
+    Write-Output "Built update archive: $portableArchive"
     return
 }
 

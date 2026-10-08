@@ -13,6 +13,8 @@ actions!(
         CloseDocument,
         QuitApplication,
         About,
+        CheckUpdates,
+        ReleaseNotes,
         Hide,
         HideOthers,
         ShowAll,
@@ -161,6 +163,7 @@ fn build(state: MenuState, recent: &[std::path::PathBuf], mac: bool) -> Vec<Menu
             name: "Tiny MD".into(),
             items: vec![
                 MenuItem::action("关于 Tiny MD", About),
+                MenuItem::action("检查更新…", CheckUpdates),
                 MenuItem::separator(),
                 MenuItem::os_submenu("服务", SystemMenuType::Services),
                 MenuItem::separator(),
@@ -344,6 +347,8 @@ fn build(state: MenuState, recent: &[std::path::PathBuf], mac: bool) -> Vec<Menu
             name: "帮助".into(),
             items: vec![
                 MenuItem::action("快速入门", QuickStart),
+                MenuItem::action("检查更新…", CheckUpdates),
+                MenuItem::action("版本变更日志", ReleaseNotes),
                 MenuItem::action("关于 Tiny MD", About),
             ],
         },
@@ -664,5 +669,21 @@ mod tests {
             MenuItem::Action { name, .. } if name == "在资源管理器中显示")));
         let mac_menus = build(MenuState::default(), &[], true);
         assert_eq!(mac_menus[0].name, "Tiny MD");
+    }
+
+    #[test]
+    fn both_platforms_expose_update_and_release_note_actions() {
+        for mac in [true, false] {
+            let menus = build(MenuState::default(), &[], mac);
+            for action in [&CheckUpdates as &dyn Action, &ReleaseNotes] {
+                assert!(
+                    menus
+                        .iter()
+                        .flat_map(|menu| &menu.items)
+                        .any(|item| matches!(item,
+                    MenuItem::Action {action: item_action, ..} if item_action.partial_eq(action)))
+                );
+            }
+        }
     }
 }

@@ -25,3 +25,16 @@
 - 无实际运行证据时，不声明原生界面、输入法或发布安装包已验收。
 - 正式说明统一放在 `docs/`，同步维护 `docs/README.md`。
 - 未经用户明确要求，不提交、推送、创建 PR 或发布版本。
+
+## 在线更新与发版
+
+- 更新实现位于 `crates/updater`，GPUI 交互位于 `crates/app/src/updates.rs`；参考 `D:/study/ashell` 的流程与 schema 1，独立实现并保留本项目许可证。
+- 版本唯一来源是根 `Cargo.toml` 的 `workspace.package.version`；界面、更新器与版本探测使用编译版本，不硬编码。
+- `CHANGELOG.md` 只记录精简摘要；版本详细正文统一在 `docs/06-delivery/versions/vX.Y.Z.md`，总览为同目录 `index.md`。
+- 新功能先归入 `Unreleased`。准备发版时同步 workspace、四个 workspace 包的锁文件版本、版本详情、总览、CHANGELOG 日期及链接。
+- 标签必须精确匹配 Cargo 版本，发版前运行 `python scripts/release_notes.py --check-current`。
+- Release Notes 从版本详情生成，排除工程验证与变更依据；更新清单、正文、安装包和便携包齐全后才能从草稿公开。
+- 禁止替换已公开版本的附件；失败重跑的公开产物不一致时必须使用新版本。
+- 自动检查不自动下载或安装。安装助手只在全部文档窗口通过未保存检查后启动；取消、保存失败必须保留窗口。
+- 开发构建只支持手动检查和下载，禁止安装更新；Windows 发布包额外运行 `scripts/test-windows-update.ps1` 的隔离助手验收。
+- 架构与验收见 `docs/03-architecture/online-updates.md` 和 `docs/04-quality/online-updates.md`。

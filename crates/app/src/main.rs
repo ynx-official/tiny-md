@@ -21,6 +21,7 @@ mod document_menu;
 mod library;
 mod menus;
 mod panels;
+mod updates;
 #[cfg(target_os = "windows")]
 mod windows_menu;
 use menus::*;
@@ -38,6 +39,7 @@ enum Intent {
     CreateFile(PathBuf),
     Close,
     Quit,
+    PrepareUpdate,
 }
 
 #[derive(Default)]
@@ -45,6 +47,9 @@ struct Session {
     windows: Vec<(AnyWindowHandle, WeakEntity<TinyMd>)>,
     recent: Vec<PathBuf>,
     quitting: bool,
+    updating: bool,
+    update_launching: bool,
+    update_approved: Vec<WindowId>,
     dark: bool,
     #[cfg(not(target_os = "windows"))]
     menu_state: Option<(WindowId, MenuState, Vec<PathBuf>)>,
@@ -78,8 +83,71 @@ fn continue_quit(cx: &mut App) {
 }
 
 fn quit(cx: &mut App) {
+    if cx.global::<Session>().updating {
+        return;
+    }
     cx.global_mut::<Session>().quitting = true;
     cx.defer(continue_quit);
+}
+
+fn begin_update(cx: &mut App) {
+    if cx.global::<Session>().updating || !updates::prepare(cx) {
+        return;
+    }
+    let session = cx.global_mut::<Session>();
+    session.updating = true;
+    session.update_launching = false;
+    session.update_approved.clear();
+    cx.defer(continue_update);
+}
+
+fn abort_update(cx: &mut App) {
+    if !cx.global::<Session>().updating {
+        return;
+    }
+    let session = cx.global_mut::<Session>();
+    session.updating = false;
+    session.update_launching = false;
+    let approved = std::mem::take(&mut session.update_approved);
+    let windows = session.windows.clone();
+    updates::cancel_preparation(cx, "安装已取消，文档窗口已保留");
+    // The caller may currently borrow a document entity. Restore approved
+    // editors after that borrow ends, including windows approved earlier.
+    cx.defer(move |cx| {
+        for (handle, view) in windows {
+            if approved.contains(&handle.window_id()) {
+                let _ = view.update(cx, |this, cx| this.set_busy(false, cx));
+            }
+        }
+    });
+}
+
+fn continue_update(cx: &mut App) {
+    if !cx.global::<Session>().updating || cx.global::<Session>().update_launching {
+        return;
+    }
+    let windows = cx.windows();
+    cx.global_mut::<Session>()
+        .windows
+        .retain(|(handle, view)| windows.contains(handle) && view.upgrade().is_some());
+    let session = cx.global::<Session>();
+    let next = session
+        .windows
+        .iter()
+        .find(|(handle, _)| !session.update_approved.contains(&handle.window_id()))
+        .cloned();
+    if let Some((handle, view)) = next {
+        if !matches!(
+            handle.update(cx, |_, window, cx| view.update(cx, |this, cx| this
+                .request(Intent::PrepareUpdate, window, cx))),
+            Ok(Ok(()))
+        ) {
+            abort_update(cx);
+        }
+    } else {
+        cx.global_mut::<Session>().update_launching = true;
+        updates::install(cx);
+    }
 }
 
 // Native menu tracking may temporarily clear NSApplication.keyWindow. Keep the
@@ -393,6 +461,7 @@ impl TinyMd {
 
     fn fail(&mut self, message: String, cx: &mut Context<Self>) {
         cx.global_mut::<Session>().quitting = false;
+        abort_update(cx);
         self.status = message;
         self.error = true;
         cx.notify();
@@ -400,8 +469,9 @@ impl TinyMd {
 
     fn request(&mut self, intent: Intent, window: &mut Window, cx: &mut Context<Self>) {
         if self.busy {
-            if matches!(intent, Intent::Quit) {
+            if matches!(intent, Intent::Quit | Intent::PrepareUpdate) {
                 cx.global_mut::<Session>().quitting = false;
+                abort_update(cx);
             }
             return;
         }
@@ -410,7 +480,7 @@ impl TinyMd {
             self.execute(intent, window, cx);
             return;
         }
-        let quitting = matches!(intent, Intent::Quit);
+        let quitting = matches!(intent, Intent::Quit | Intent::PrepareUpdate);
         self.set_busy(true, cx);
         let answer = window.prompt(
             PromptLevel::Warning,
@@ -430,6 +500,7 @@ impl TinyMd {
                     _ => {
                         if quitting {
                             cx.global_mut::<Session>().quitting = false;
+                            abort_update(cx);
                         }
                     }
                 }
@@ -444,6 +515,18 @@ impl TinyMd {
             Intent::Open => self.open(window, cx),
             Intent::OpenPath(path) => self.load_path(path, window, cx),
             Intent::CreateFile(path) => self.create_library_file(path, window, cx),
+            Intent::PrepareUpdate => {
+                if !cx.global::<Session>().updating {
+                    return;
+                }
+                // Freeze approved editors until all windows approve. No window
+                // is closed and no helper starts during the confirmation pass.
+                self.set_busy(true, cx);
+                cx.global_mut::<Session>()
+                    .update_approved
+                    .push(window.window_handle().window_id());
+                cx.defer(continue_update);
+            }
             Intent::Close | Intent::Quit => {
                 self.closing_approved = true;
                 window.remove_window();
@@ -579,6 +662,7 @@ impl TinyMd {
                     Ok(Ok(Some(path))) => this.write(Some(path), after, window, cx),
                     Ok(Ok(None)) => {
                         cx.global_mut::<Session>().quitting = false;
+                        abort_update(cx);
                     }
                     Ok(Err(e)) => this.fail(format!("无法选择保存位置：{e}"), cx),
                     Err(e) => this.fail(format!("无法选择保存位置：{e}"), cx),
@@ -635,6 +719,7 @@ impl TinyMd {
                     }
                     Err(e) => {
                         cx.global_mut::<Session>().quitting = false;
+                        abort_update(cx);
                         if matches!(e, tiny_md_document::SyncError::Conflict) {
                             this.mark_sync_conflict(cx);
                             this.resolve_external_conflict(after, window, cx);
@@ -848,13 +933,11 @@ impl TinyMd {
 }
 
 fn about(window: &mut Window, cx: &mut App) {
-    let answer = window.prompt(
-        PromptLevel::Info,
-        "Tiny MD",
-        Some("原生 Markdown 写作应用 · 0.1.0\nRust · GPUI · GPUI Component · Guise"),
-        &["好"],
-        cx,
+    let message = format!(
+        "原生 Markdown 写作应用 · {}\nRust · GPUI · GPUI Component · Guise",
+        env!("CARGO_PKG_VERSION")
     );
+    let answer = window.prompt(PromptLevel::Info, "Tiny MD", Some(&message), &["好"], cx);
     cx.spawn(async move |_| {
         let _ = answer.await;
     })
@@ -1275,6 +1358,8 @@ impl Render for TinyMd {
             .on_action(cx.listener(|_, _: &Fullscreen, w, _| w.toggle_fullscreen()))
             .on_action(cx.listener(|this, _: &WordCount, w, cx| this.stats(w, cx)))
             .on_action(cx.listener(|_, _: &About, w, cx| about(w, cx)))
+            .on_action(cx.listener(|_, _: &CheckUpdates, _, cx| updates::show(cx, true, false)))
+            .on_action(cx.listener(|_, _: &ReleaseNotes, _, cx| updates::show(cx, false, true)))
             .on_action(cx.listener(|_, _: &Hide, _, cx| cx.hide()))
             .on_action(cx.listener(|_, _: &HideOthers, _, cx| cx.hide_other_apps()))
             .on_action(cx.listener(|_, _: &ShowAll, _, cx| cx.unhide_other_apps()))
@@ -1359,6 +1444,9 @@ impl Render for TinyMd {
 }
 
 fn open_editor_window(initial: Option<PathBuf>, empty: bool, cx: &mut App) {
+    if cx.global::<Session>().updating {
+        return;
+    }
     let bounds = Bounds::centered(None, size(px(1120.0), px(780.0)), cx);
     let result = cx.open_window(
         WindowOptions {
@@ -1388,6 +1476,25 @@ fn open_editor_window(initial: Option<PathBuf>, empty: bool, cx: &mut App) {
 }
 
 fn main() {
+    // The copied updater helper and version probe must never initialize GPUI.
+    let args: Vec<_> = std::env::args_os().skip(1).collect();
+    if args.first().is_some_and(|a| a == "--version") {
+        println!("Tiny MD {}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
+    if args.first().is_some_and(|a| a == "--apply-update") {
+        let result = args
+            .get(1)
+            .ok_or_else(|| "缺少更新计划".to_string())
+            .and_then(|path| {
+                tiny_md_updater::install::helper_main(Path::new(path)).map_err(|e| format!("{e:#}"))
+            });
+        if let Err(error) = result {
+            eprintln!("更新失败：{error}");
+            std::process::exit(1);
+        }
+        return;
+    }
     let initial = std::env::args_os()
         .skip(1)
         .find(|arg| !arg.to_string_lossy().starts_with('-'))
@@ -1430,7 +1537,80 @@ fn main() {
             cx.on_action(|_: &HideOthers, cx| cx.hide_other_apps());
             cx.on_action(|_: &ShowAll, cx| cx.unhide_other_apps());
             menus::register_forwarding(cx);
+            cx.on_action(|_: &CheckUpdates, cx| updates::show(cx, true, false));
+            cx.on_action(|_: &ReleaseNotes, cx| updates::show(cx, false, true));
             let empty = cfg!(target_os = "windows") && initial.is_none();
             open_editor_window(initial, empty, cx);
+            updates::init(cx);
         });
+}
+
+#[cfg(test)]
+mod update_exit_tests {
+    use super::*;
+    use core::prelude::v1::test;
+
+    #[gpui::test]
+    fn cancelling_update_save_keeps_the_document_and_never_starts_installation(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            guise_theme(false).init(cx);
+            cx.set_global(Session::default());
+            updates::init(cx);
+        });
+        let (view, cx) = cx.add_window_view(|window, cx| TinyMd::new(None, window, cx));
+        cx.update(|window, cx| {
+            cx.global_mut::<Session>()
+                .windows
+                .push((window.window_handle(), view.downgrade()));
+            cx.global_mut::<Session>().updating = true;
+            view.update(cx, |this, cx| {
+                this.install(Document::untitled("base"), "base", window, cx);
+                this.editor
+                    .update(cx, |editor, cx| editor.set_text("unsaved text", cx));
+                this.request(Intent::PrepareUpdate, window, cx);
+            });
+        });
+        assert!(cx.has_pending_prompt());
+        cx.simulate_prompt_answer("取消");
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            assert!(!cx.global::<Session>().updating);
+            assert!(!cx.global::<Session>().update_launching);
+            assert!(cx.global::<Session>().update_approved.is_empty());
+            assert!(cx.windows().contains(&window.window_handle()));
+            assert_eq!(view.read(cx).editor.read(cx).text(), "unsaved text");
+            assert!(!view.read(cx).busy);
+        });
+    }
+
+    #[gpui::test]
+    fn aborting_restores_previously_approved_windows_without_closing_them(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            guise_theme(false).init(cx);
+            cx.set_global(Session::default());
+            updates::init(cx);
+        });
+        let (view, cx) = cx.add_window_view(|window, cx| TinyMd::new(None, window, cx));
+        cx.update(|window, cx| {
+            let id = window.window_handle().window_id();
+            let session = cx.global_mut::<Session>();
+            session
+                .windows
+                .push((window.window_handle(), view.downgrade()));
+            session.updating = true;
+            session.update_approved.push(id);
+            view.update(cx, |this, cx| this.set_busy(true, cx));
+            abort_update(cx);
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            assert!(!view.read(cx).busy);
+            assert!(cx.windows().contains(&window.window_handle()));
+            assert!(!cx.global::<Session>().update_launching);
+        });
+    }
 }
