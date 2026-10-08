@@ -74,7 +74,12 @@ struct DiagramViewer {
 
 impl DiagramViewer {
     fn new(diagram: Diagram, dark: bool, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let image = cx.new(|cx| DiagramImage::new(diagram.clone(), cx));
+        let image = cx.new(|cx| DiagramImage::high_definition(diagram.clone(), cx));
+        let close_image = image.downgrade();
+        window.on_window_should_close(cx, move |window, cx| {
+            let _ = close_image.update(cx, |image, cx| image.unload(window, cx));
+            true
+        });
         let focus = cx.focus_handle();
         window.focus(&focus);
         window.set_window_title("流程图查看 — Tiny MD");
@@ -95,15 +100,85 @@ impl DiagramViewer {
         );
         cx.notify();
     }
+
+    fn close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.image.update(cx, |image, cx| image.unload(window, cx));
+        window.remove_window();
+    }
+
+    fn title_bar(&self, cx: &mut Context<Self>) -> AnyElement {
+        if !cfg!(target_os = "windows") {
+            return TitleBar::new()
+                .child(div().text_size(px(13.0)).child("流程图查看"))
+                .into_any_element();
+        }
+        let surface = if self.dark {
+            rgb(0x252c28)
+        } else {
+            rgb(0xf0f3f9)
+        };
+        div()
+            .h(px(34.0))
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .bg(surface)
+            .child(
+                div()
+                    .flex_1()
+                    .h_full()
+                    .px(px(12.0))
+                    .flex()
+                    .items_center()
+                    .window_control_area(WindowControlArea::Drag)
+                    .text_size(px(13.0))
+                    .child("流程图查看"),
+            )
+            .child(
+                Button::new("viewer-minimize")
+                    .ghost()
+                    .label("−")
+                    .w(px(40.0))
+                    .h_full()
+                    .on_click(|_, window, _| window.minimize_window()),
+            )
+            .child(
+                Button::new("viewer-maximize")
+                    .ghost()
+                    .label("□")
+                    .w(px(40.0))
+                    .h_full()
+                    .on_click(|_, window, _| window.zoom_window()),
+            )
+            .child(
+                div()
+                    .h_full()
+                    .debug_selector(|| "viewer-close".into())
+                    .child(
+                        Button::new("viewer-close")
+                            .ghost()
+                            .label("×")
+                            .w(px(40.0))
+                            .h_full()
+                            .on_click(cx.listener(|this, _, window, cx| this.close(window, cx))),
+                    ),
+            )
+            .into_any_element()
+    }
 }
 
 impl Render for DiagramViewer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let (width, height) = self.viewport.image_size();
-        self.image.update(cx, |image, cx| {
-            image.set_display_size(width, height, window.scale_factor(), cx)
-        });
         let (x, y) = self.viewport.origin();
+        self.image.update(cx, |image, cx| {
+            image.set_viewport(
+                self.viewport.size,
+                (x, y),
+                self.viewport.scale(),
+                window.scale_factor(),
+                cx,
+            )
+        });
         let entity = cx.entity().downgrade();
         let previous_bounds = self.bounds;
         let canvas_bg = if self.dark {
@@ -126,6 +201,7 @@ impl Render for DiagramViewer {
         } else {
             rgb(0x37352f)
         };
+        let title_bar = self.title_bar(cx);
         div()
             .id("diagram-viewer")
             .size_full()
@@ -134,17 +210,17 @@ impl Render for DiagramViewer {
             .bg(canvas_bg)
             .text_color(ink)
             .track_focus(&self.focus)
-            .on_action(|_: &CloseDocument, window, cx| {
+            .on_action(cx.listener(|this, _: &CloseDocument, window, cx| {
                 cx.stop_propagation();
-                window.remove_window();
-            })
-            .on_key_down(|event, window, cx| {
+                this.close(window, cx);
+            }))
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 if event.keystroke.key == "escape" {
                     cx.stop_propagation();
-                    window.remove_window();
+                    this.close(window, cx);
                 }
-            })
-            .child(TitleBar::new().child(div().text_size(px(13.0)).child("流程图查看")))
+            }))
+            .child(title_bar)
             .child(
                 div()
                     .h(px(44.0))
@@ -258,15 +334,7 @@ impl Render for DiagramViewer {
                         cx.stop_propagation();
                         cx.notify();
                     }))
-                    .child(
-                        div()
-                            .absolute()
-                            .left(px(x))
-                            .top(px(y))
-                            .w(px(width))
-                            .h(px(height))
-                            .child(self.image.clone()),
-                    )
+                    .child(div().absolute().size_full().child(self.image.clone()))
                     .child(
                         canvas(
                             |_, _, _| (),
@@ -338,6 +406,68 @@ mod tests {
     };
     use std::sync::Arc;
     use tiny_md_editor::Diagram;
+
+    #[gpui::test]
+    fn native_close_button_accepts_closing_the_viewer(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let diagram = Diagram {
+            image: Arc::new(Image::from_bytes(ImageFormat::Svg, br##"<svg xmlns="http://www.w3.org/2000/svg" width="400" height="200" viewBox="0 0 400 200"><rect width="400" height="200" fill="#edf6f1"/></svg>"##.to_vec())),
+            width: 400.0, height: 200.0,
+        };
+        let (view, cx) =
+            cx.add_window_view(|window, cx| DiagramViewer::new(diagram, false, window, cx));
+        for _ in 0..3 {
+            cx.update(|window, cx| {
+                window.refresh();
+                window.draw(cx).clear();
+            });
+        }
+        cx.run_until_parked();
+        cx.background_executor
+            .advance_clock(std::time::Duration::from_millis(101));
+        cx.run_until_parked();
+        assert!(cx.read(|cx| view.read(cx).image.read(cx).decoded_size().is_some()));
+        assert!(
+            cx.simulate_close(),
+            "the native close button must be accepted independently of keyboard actions"
+        );
+        assert!(
+            cx.read(|cx| view.read(cx).image.read(cx).decoded_size().is_none()),
+            "native close must unload the high-definition bitmap immediately"
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[gpui::test]
+    fn clicking_the_titlebar_close_button_unloads_only_the_viewer(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let original = cx.add_window(|_, _| gpui::Empty).into();
+        let diagram = Diagram {
+            image: Arc::new(Image::from_bytes(ImageFormat::Svg, br##"<svg xmlns="http://www.w3.org/2000/svg" width="400" height="200" viewBox="0 0 400 200"><rect width="400" height="200" fill="#edf6f1"/></svg>"##.to_vec())),
+            width: 400.0, height: 200.0,
+        };
+        let (view, cx) =
+            cx.add_window_view(|window, cx| DiagramViewer::new(diagram, false, window, cx));
+        for _ in 0..3 {
+            cx.update(|window, cx| {
+                window.refresh();
+                window.draw(cx).clear();
+            });
+        }
+        cx.run_until_parked();
+        cx.background_executor
+            .advance_clock(std::time::Duration::from_millis(101));
+        cx.run_until_parked();
+        assert!(cx.read(|cx| view.read(cx).image.read(cx).decoded_size().is_some()));
+        let close = cx
+            .debug_bounds("viewer-close")
+            .expect("Windows titlebar close button");
+        cx.simulate_click(close.center(), Modifiers::none());
+        cx.read(|cx| {
+            assert!(cx.windows() == vec![original]);
+            assert!(view.read(cx).image.read(cx).decoded_size().is_none());
+        });
+    }
 
     #[gpui::test]
     fn viewer_mouse_zoom_drag_and_close_only_affect_the_viewer(cx: &mut TestAppContext) {

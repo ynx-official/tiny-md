@@ -12,6 +12,6 @@
 | [验证记录](verification.md) | 自动检查、原生交互和输入法验收证据 |
 | [长文档渲染性能](04-quality/render-performance-analysis.md) | 实测开销、卡顿来源与优化顺序 |
 | [渲染性能优化](04-quality/render-performance-optimization.md) | 五项优化实现、缓存回归与原生复测边界 |
-| [流程图内存与独立查看](04-quality/diagram-memory-and-viewer.md) | 按显示尺寸渲染、缩放拖动窗口与内存对照 |
+| [流程图内存与独立查看](04-quality/diagram-memory-and-viewer.md) | 全图预渲染、高清缩放拖动、关闭回收与内存对照 |
 | [开发路线](roadmap.md) | 现有功能与后续范围 |
 | [版本构建](releases.md) | macOS 与 Windows 安装包构建及发布流程 |

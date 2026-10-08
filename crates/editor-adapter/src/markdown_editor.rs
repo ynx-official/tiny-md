@@ -1819,9 +1819,6 @@ impl MarkdownEditor {
         self.diagrams
             .retain(|key, _| all_keys.iter().flatten().any(|current| current == key));
         for key in all_keys.iter().flatten() {
-            if self.source_mode {
-                continue;
-            }
             if self.diagrams.contains_key(key) {
                 continue;
             }
@@ -1865,10 +1862,17 @@ impl MarkdownEditor {
                     Some(DiagramState::Ready(diagram)) => Some(diagram),
                     _ => None,
                 };
-                self.diagram_views
+                let view = self
+                    .diagram_views
                     .get_mut(&parsed.code[index].start)
-                    .unwrap()
-                    .retain_preview(diagram, cx);
+                    .unwrap();
+                view.retain_preview(diagram, cx);
+                if let Some(diagram) = diagram {
+                    let (width, height) = diagram
+                        .display_size(wrap_total - 32.0 - diagrams::PREVIEW_PADDING, view.zoom);
+                    // Populate every diagram at document-open time; row elements remain virtualized.
+                    view.preview(diagram, width, height, window.scale_factor(), cx);
+                }
             }
         }
         let keys = if self.source_mode {

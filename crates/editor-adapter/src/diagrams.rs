@@ -30,6 +30,12 @@ pub struct DiagramView {
 }
 
 impl DiagramView {
+    #[cfg(test)]
+    pub(crate) fn preview_size(&self, cx: &App) -> Option<RasterSize> {
+        self.preview
+            .as_ref()
+            .and_then(|preview| preview.read(cx).decoded_size())
+    }
     pub fn retain_preview(&mut self, diagram: Option<&Diagram>, cx: &App) {
         if self
             .preview
@@ -71,11 +77,37 @@ impl DiagramView {
 impl Diagram {
     /// Only resize the SVG root canvas. Its viewBox and vector geometry stay intact.
     pub fn image_at_size(&self, size: RasterSize) -> Arc<Image> {
+        self.raster_source(size, None)
+    }
+
+    pub(crate) fn image_in_region(&self, size: RasterSize, region: DiagramRegion) -> Arc<Image> {
+        self.raster_source(size, Some(region))
+    }
+
+    fn raster_source(&self, size: RasterSize, region: Option<DiagramRegion>) -> Arc<Image> {
         let svg = std::str::from_utf8(self.image.bytes()).expect("renderer produces UTF-8 SVG");
         let start = svg.find("<svg ").expect("renderer produces an SVG root");
         let end = start + svg[start..].find('>').unwrap();
         let root = replace_root_attribute(&svg[start..end], "width", size.width);
-        let root = replace_root_attribute(&root, "height", size.height);
+        let mut root = replace_root_attribute(&root, "height", size.height);
+        if let Some(region) = region {
+            // The renderer's geometry can start outside (0,0); preserve that origin.
+            let marker = " viewBox=\"";
+            let start = root.find(marker).unwrap() + marker.len();
+            let end = start + root[start..].find('"').unwrap();
+            let viewbox: Vec<f32> = root[start..end]
+                .split_whitespace()
+                .map(|value| value.parse().unwrap())
+                .collect();
+            let value = format!(
+                "{} {} {} {}",
+                viewbox[0] + region.x,
+                viewbox[1] + region.y,
+                region.width,
+                region.height
+            );
+            root = format!("{}{}{}", &root[..start], value, &root[end..]);
+        }
         Arc::new(Image::from_bytes(
             ImageFormat::Svg,
             format!("{}{}{}", &svg[..start], root, &svg[end..]).into_bytes(),
@@ -94,6 +126,14 @@ impl Diagram {
     pub fn viewport_height(&self, available: f32, zoom: Option<f32>) -> f32 {
         self.display_size(available, zoom).1 + PREVIEW_PADDING
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct DiagramRegion {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
 }
 
 fn replace_root_attribute(root: &str, name: &str, value: u32) -> String {

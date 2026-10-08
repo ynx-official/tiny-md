@@ -3,6 +3,87 @@ use gpui::TestAppContext;
 use gpui::{EntityInputHandler, ScrollDelta, ScrollWheelEvent, size};
 
 #[gpui::test]
+fn all_diagrams_finish_decoding_after_open_without_any_scroll(cx: &mut TestAppContext) {
+    cx.update(|cx| guise::Theme::light().init(cx));
+    let text = std::env::var_os("TINY_MD_DIAGRAM_DOCUMENT")
+        .map(|path| std::fs::read_to_string(path).expect("read diagram document"))
+        .unwrap_or_else(|| format!("paragraph\n{}\n```mermaid\nflowchart LR\nA --> B\n```\n\n```mermaid\nflowchart TD\nC --> D\n```\n\n```mermaid\nflowchart LR\nA --> B\n```", "offscreen text\n".repeat(200)));
+    let expected =
+        crate::code_blocks::collect(&text.lines().map(str::to_owned).collect::<Vec<_>>())
+            .0
+            .iter()
+            .filter(|block| block.is_mermaid())
+            .count();
+    let (editor, cx) = cx.add_window_view(|window, cx| {
+        let mut editor = MarkdownEditor::new(cx).value(&text).style(MarkdownStyle {
+            bare: true,
+            ..Default::default()
+        });
+        editor.set_read_only(true, cx);
+        window.focus(&editor.focus);
+        editor
+    });
+    cx.simulate_resize(size(px(1064.0), px(700.0)));
+    let dpi = cx.update(|window, _| window.scale_factor());
+    for _ in 0..3 {
+        draw(cx);
+        draw(cx);
+        cx.run_until_parked();
+        cx.background_executor
+            .advance_clock(std::time::Duration::from_millis(1000));
+        cx.run_until_parked();
+    }
+    cx.read(|cx| {
+        let editor = editor.read(cx);
+        let parsed = editor.document_cache.current().unwrap();
+        let states: Vec<_> = parsed.code.iter().filter(|block| block.is_mermaid())
+            .filter_map(|block| editor.diagrams.get(&DiagramKey { source: block.source.clone(), dark: false })).collect();
+        let ready = states.iter().filter(|state| matches!(state, DiagramState::Ready(_))).count();
+        let errors = states.iter().filter(|state| matches!(state, DiagramState::Error(_))).count();
+        let decoded: Vec<_> = editor.diagram_views.values().filter_map(|view| view.preview_size(cx)).collect();
+        assert_eq!(ready + errors, expected);
+        assert_eq!(decoded.len(), ready, "every valid diagram must have decoded pixels before scrolling");
+        println!("mermaid_blocks={expected} ready={ready} errors={errors} decoded={} dpi={dpi} pixel_mib={:.2}", decoded.len(), decoded.iter().map(|size| size.bytes()).sum::<usize>() as f64 / 1048576.0);
+        assert_eq!(editor.text(), text);
+    });
+}
+
+#[gpui::test]
+fn opening_the_document_decodes_offscreen_diagrams_without_scrolling(cx: &mut TestAppContext) {
+    cx.update(|cx| guise::Theme::light().init(cx));
+    let source = "flowchart LR\nA --> B";
+    let key = DiagramKey {
+        source: source.into(),
+        dark: false,
+    };
+    let diagram = diagrams::render(&key).unwrap();
+    let text = format!(
+        "paragraph\n{}\n```mermaid\n{source}\n```",
+        "offscreen text\n".repeat(200)
+    );
+    let (editor, cx) = cx.add_window_view(|window, cx| {
+        let mut editor = MarkdownEditor::new(cx).value(&text).style(MarkdownStyle {
+            bare: true,
+            ..Default::default()
+        });
+        editor.diagrams.insert(key, DiagramState::Ready(diagram));
+        window.focus(&editor.focus);
+        editor
+    });
+    draw(cx);
+    draw(cx);
+    cx.run_until_parked();
+    cx.background_executor
+        .advance_clock(std::time::Duration::from_millis(101));
+    cx.run_until_parked();
+    cx.read(|cx| {
+        let editor = editor.read(cx);
+        let view = editor.diagram_views.values().next().unwrap();
+        assert!(view.preview_size(cx).is_some(), "opening must finish pixel decoding for a diagram outside the viewport without scrolling");
+    });
+}
+
+#[gpui::test]
 fn diagram_view_button_emits_a_snapshot_without_editing_the_document(cx: &mut TestAppContext) {
     cx.update(|cx| guise::Theme::light().init(cx));
     let text = "paragraph\n\n```mermaid\nflowchart LR\nA --> B\n```";
