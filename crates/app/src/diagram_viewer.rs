@@ -299,7 +299,9 @@ impl Render for DiagramViewer {
                     )
                     .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
                         if event.pressed_button != Some(MouseButton::Left) {
-                            this.drag = None;
+                            if this.drag.take().is_some() {
+                                cx.notify();
+                            }
                             return;
                         }
                         if let Some(previous) = this.drag {

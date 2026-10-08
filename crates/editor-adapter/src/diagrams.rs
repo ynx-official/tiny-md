@@ -77,37 +77,11 @@ impl DiagramView {
 impl Diagram {
     /// Only resize the SVG root canvas. Its viewBox and vector geometry stay intact.
     pub fn image_at_size(&self, size: RasterSize) -> Arc<Image> {
-        self.raster_source(size, None)
-    }
-
-    pub(crate) fn image_in_region(&self, size: RasterSize, region: DiagramRegion) -> Arc<Image> {
-        self.raster_source(size, Some(region))
-    }
-
-    fn raster_source(&self, size: RasterSize, region: Option<DiagramRegion>) -> Arc<Image> {
         let svg = std::str::from_utf8(self.image.bytes()).expect("renderer produces UTF-8 SVG");
         let start = svg.find("<svg ").expect("renderer produces an SVG root");
         let end = start + svg[start..].find('>').unwrap();
         let root = replace_root_attribute(&svg[start..end], "width", size.width);
-        let mut root = replace_root_attribute(&root, "height", size.height);
-        if let Some(region) = region {
-            // The renderer's geometry can start outside (0,0); preserve that origin.
-            let marker = " viewBox=\"";
-            let start = root.find(marker).unwrap() + marker.len();
-            let end = start + root[start..].find('"').unwrap();
-            let viewbox: Vec<f32> = root[start..end]
-                .split_whitespace()
-                .map(|value| value.parse().unwrap())
-                .collect();
-            let value = format!(
-                "{} {} {} {}",
-                viewbox[0] + region.x,
-                viewbox[1] + region.y,
-                region.width,
-                region.height
-            );
-            root = format!("{}{}{}", &root[..start], value, &root[end..]);
-        }
+        let root = replace_root_attribute(&root, "height", size.height);
         Arc::new(Image::from_bytes(
             ImageFormat::Svg,
             format!("{}{}{}", &svg[..start], root, &svg[end..]).into_bytes(),
@@ -128,14 +102,6 @@ impl Diagram {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct DiagramRegion {
-    pub x: f32,
-    pub y: f32,
-    pub width: f32,
-    pub height: f32,
-}
-
 fn replace_root_attribute(root: &str, name: &str, value: u32) -> String {
     let marker = format!(" {name}=\"");
     let start = root
@@ -153,6 +119,29 @@ pub struct RasterSize {
 }
 
 impl RasterSize {
+    /// One fixed full-diagram bitmap; viewer gestures never change this target.
+    pub fn for_viewer(width: f32, height: f32) -> Self {
+        let sanitize = |value: f32| {
+            if value.is_finite() && value > 0.0 {
+                value
+            } else {
+                1.0
+            }
+        };
+        let width = sanitize(width) * 4.0;
+        let height = sanitize(height) * 4.0;
+        // Both GPUI's DirectX and Metal atlases limit texture edges to 16384.
+        // The 64 MiB pixel budget also limits square diagrams to 4096 x 4096.
+        let scale = (16384.0 / width)
+            .min(16384.0 / height)
+            .min((16_777_216.0 / (width * height)).sqrt())
+            .min(1.0);
+        Self {
+            width: (width * scale).floor().max(1.0) as u32,
+            height: (height * scale).floor().max(1.0) as u32,
+        }
+    }
+
     pub fn for_display(width: f32, height: f32, dpi: f32) -> Self {
         let sanitize = |value: f32| {
             if value.is_finite() && value > 0.0 {
@@ -301,6 +290,44 @@ mod tests {
         assert_eq!(diagram.viewport_height(300.0, Some(1.5)), 3624.0);
         assert_eq!(diagram.display_size(300.0, None), (300.0, 1800.0));
         assert_eq!(diagram.viewport_height(300.0, None), 1824.0);
+    }
+
+    #[test]
+    fn fixed_viewer_resolution_is_four_times_logical_size_and_bounds_full_diagrams() {
+        assert_eq!(
+            RasterSize::for_viewer(400.0, 200.0),
+            RasterSize {
+                width: 1600,
+                height: 800
+            }
+        );
+        assert_eq!(
+            RasterSize::for_viewer(200.0, 400.0),
+            RasterSize {
+                width: 800,
+                height: 1600
+            }
+        );
+        for (width, height) in [
+            (12000.0, 2000.0),
+            (2000.0, 12000.0),
+            (12000.0, 12000.0),
+            (400.0, 12000.0),
+            (12000.0, 400.0),
+        ] {
+            let size = RasterSize::for_viewer(width, height);
+            assert!(size.width <= 16384 && size.height <= 16384);
+            assert!(size.bytes() <= 64 * 1024 * 1024);
+            assert!((size.width as f32 / size.height as f32 - width / height).abs() < 0.1);
+            let transposed = RasterSize::for_viewer(height, width);
+            assert_eq!(size.width, transposed.height);
+            assert_eq!(size.height, transposed.width);
+        }
+        for (width, height) in [(f32::NAN, 0.0), (f32::INFINITY, -20.0), (0.0, 0.0)] {
+            let size = RasterSize::for_viewer(width, height);
+            assert!(size.width > 0 && size.height > 0);
+            assert!(size.bytes() <= 64 * 1024 * 1024);
+        }
     }
 
     #[test]
