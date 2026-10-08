@@ -118,11 +118,7 @@ impl TinyMd {
                 false,
             ))
             .item(item(
-                if cfg!(target_os = "macos") {
-                    "在 Finder 中显示"
-                } else {
-                    "在文件管理器中显示"
-                },
+                menus::reveal_label(),
                 DocumentCommand::Reveal,
                 target.is_none(),
                 false,

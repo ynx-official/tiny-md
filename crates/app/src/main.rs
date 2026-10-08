@@ -1,3 +1,5 @@
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
+
 use gpui::{prelude::*, *};
 use gpui_component::{
     Disableable, Root, Selectable, Sizable, TitleBar,
@@ -13,12 +15,17 @@ use tiny_md_editor::{
 #[cfg(target_os = "macos")]
 mod app_icon;
 mod assets;
+mod disk_sync;
 mod document_menu;
 mod library;
 mod menus;
 mod panels;
+#[cfg(target_os = "windows")]
+mod windows_menu;
 use menus::*;
 use panels::SidebarMode;
+#[cfg(target_os = "windows")]
+use windows_menu::WindowsMenuBar;
 
 const WELCOME: &str = include_str!("../../../fixtures/welcome.md");
 
@@ -38,6 +45,7 @@ struct Session {
     recent: Vec<PathBuf>,
     quitting: bool,
     dark: bool,
+    #[cfg(not(target_os = "windows"))]
     menu_state: Option<(WindowId, MenuState, Vec<PathBuf>)>,
     current: Option<WindowId>,
 }
@@ -109,8 +117,12 @@ fn forward_action(action: &dyn Action, cx: &mut App) -> bool {
 }
 
 struct TinyMd {
+    #[cfg(target_os = "windows")]
+    menu_bar: Option<(MenuState, Vec<PathBuf>, Entity<WindowsMenuBar>)>,
     editor: Entity<MarkdownEditor>,
     document: Document,
+    _disk_sync_task: Task<()>,
+    external_conflict: bool,
     headings: Vec<Heading>,
     characters: usize,
     dirty: bool,
@@ -140,12 +152,63 @@ struct TinyMd {
     closing_approved: bool,
 }
 
+fn ui_font() -> &'static str {
+    if cfg!(target_os = "macos") {
+        ".AppleSystemUIFont"
+    } else if cfg!(target_os = "windows") {
+        "Segoe UI"
+    } else {
+        ".SystemUIFont"
+    }
+}
+
+fn guise_theme(dark: bool) -> guise::Theme {
+    let mut theme = if dark {
+        guise::Theme::dark()
+    } else {
+        guise::Theme::light()
+    };
+    if cfg!(target_os = "windows") {
+        theme.font_family = ui_font().into();
+    }
+    theme
+}
+
+#[cfg(target_os = "windows")]
+fn apply_windows_theme(dark: bool, cx: &mut App) {
+    let theme = gpui_component::Theme::global_mut(cx);
+    theme.font_family = ui_font().into();
+    // The local Notion reference supplies light workspace tokens. Keep the
+    // existing dark palette, which has already been designed for this editor.
+    if !dark {
+        theme.background = rgb(0xffffff).into();
+        theme.foreground = rgb(0x37352f).into();
+        theme.border = rgb(0xe5e3df).into();
+        theme.title_bar = rgb(0xf6f5f4).into();
+        theme.title_bar_border = rgb(0xe5e3df).into();
+        theme.popover = rgb(0xffffff).into();
+        theme.popover_foreground = rgb(0x37352f).into();
+        theme.secondary = rgb(0xf6f5f4).into();
+        theme.secondary_foreground = rgb(0x37352f).into();
+        theme.secondary_hover = rgb(0xede9e4).into();
+        theme.accent = rgb(0xf0eeec).into();
+        theme.accent_foreground = rgb(0x37352f).into();
+        theme.primary = rgb(0x5645d4).into();
+        theme.primary_active = rgb(0x4534b3).into();
+        theme.primary_hover = rgb(0x4534b3).into();
+        theme.ring = rgb(0x5645d4).into();
+    }
+}
+
 fn editor_style(dark: bool) -> MarkdownStyle {
     MarkdownStyle {
         bare: true,
+        compact_headings: cfg!(target_os = "windows"),
         bg: Some(rgb(if dark { 0x222529 } else { 0xffffff }).into()),
         text: Some(rgb(if dark { 0xe4e6e9 } else { 0x24292f }).into()),
-        caret: Some(rgb(if dark { 0x8eac98 } else { 0x3f7154 }).into()),
+        caret: Some(rgb(if dark { 0xe4e6e9 } else { 0x24292f }).into()),
+        quote_text: Some(rgb(if dark { 0xb2b7bf } else { 0x787671 }).into()),
+        quote_bar: Some(rgb(if dark { 0x737b86 } else { 0xdde0e4 }).into()),
         accent: Some(rgb(if dark { 0x8eac98 } else { 0x3f7154 }).into()),
         ..Default::default()
     }
@@ -203,13 +266,15 @@ impl TinyMd {
                     this.dirty = this.document.is_dirty(text);
                     this.characters = text.chars().filter(|c| !c.is_whitespace()).count();
                     this.headings = outline(text);
-                    this.status = if this.dirty {
+                    this.status = if this.external_conflict {
+                        disk_sync::CONFLICT_NOTICE
+                    } else if this.dirty {
                         "有未保存的修改"
                     } else {
                         "与已保存版本一致"
                     }
                     .into();
-                    this.error = false;
+                    this.error = this.external_conflict;
                     if let Some(entry) = this
                         .documents
                         .iter_mut()
@@ -254,8 +319,12 @@ impl TinyMd {
             .and_then(Path::parent)
             .map(Path::to_path_buf);
         let mut this = Self {
+            #[cfg(target_os = "windows")]
+            menu_bar: None,
             editor,
             document,
+            _disk_sync_task: Self::start_disk_sync(window, cx),
+            external_conflict: false,
             headings: outline(&text),
             characters: text.chars().filter(|c| !c.is_whitespace()).count(),
             dirty: false,
@@ -374,6 +443,7 @@ impl TinyMd {
         cx: &mut Context<Self>,
     ) {
         self.document = document;
+        self.external_conflict = false;
         if let Some(parent) = self.document.path().and_then(Path::parent)
             && !self
                 .library_root
@@ -470,7 +540,17 @@ impl TinyMd {
             .map(Path::to_path_buf)
             .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
             .unwrap_or_else(|| PathBuf::from("."));
-        let suggested = self.document.title();
+        let suggested = if self.external_conflict {
+            format!(
+                "{}-本地副本.md",
+                Path::new(&self.document.title())
+                    .file_stem()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+            )
+        } else {
+            self.document.title()
+        };
         let path = cx.prompt_for_new_path(&directory, Some(&suggested));
         cx.spawn_in(window, async move |this, cx| {
             let path = path.await;
@@ -503,10 +583,10 @@ impl TinyMd {
         self.status = "正在保存……".into();
         let task = cx.background_executor().spawn(async move {
             let result = match path {
-                Some(path) => document.save_as(&path, &text),
-                None => document.save(&text),
+                Some(path) => document.save_as_synchronized(&path, &text),
+                None => document.save_synchronized(&text),
             };
-            result.map(|_| document)
+            result.map(|saved_text| (document, saved_text))
         });
         cx.spawn_in(window, async move |this, cx| {
             let result = task.await;
@@ -514,8 +594,8 @@ impl TinyMd {
                 this.set_busy(false, cx);
                 this.editor.read(cx).focus_handle().focus(window);
                 match result {
-                    Ok(document) => {
-                        this.document = document;
+                    Ok((document, text)) => {
+                        this.adopt_synced(document, &text, "已保存", cx);
                         if let Some(parent) = this.document.path().and_then(Path::parent)
                             && !this
                                 .library_root
@@ -537,7 +617,12 @@ impl TinyMd {
                     }
                     Err(e) => {
                         cx.global_mut::<Session>().quitting = false;
-                        this.fail(format!("保存失败：{e}"), cx);
+                        if matches!(e, tiny_md_document::SyncError::Conflict) {
+                            this.mark_sync_conflict(cx);
+                            this.resolve_external_conflict(after, window, cx);
+                        } else {
+                            this.fail(format!("保存失败：{e}"), cx);
+                        }
                     }
                 }
                 cx.notify();
@@ -561,11 +646,7 @@ impl TinyMd {
     fn toggle_theme(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.dark = !self.dark;
         cx.global_mut::<Session>().dark = self.dark;
-        if self.dark {
-            guise::Theme::dark().init(cx);
-        } else {
-            guise::Theme::light().init(cx);
-        }
+        guise_theme(self.dark).init(cx);
         gpui_component::Theme::change(
             if self.dark {
                 gpui_component::ThemeMode::Dark
@@ -575,6 +656,8 @@ impl TinyMd {
             Some(window),
             cx,
         );
+        #[cfg(target_os = "windows")]
+        apply_windows_theme(self.dark, cx);
         self.editor.update(cx, |editor, cx| {
             editor.set_style(editor_style(self.dark), cx)
         });
@@ -762,7 +845,16 @@ fn about(window: &mut Window, cx: &mut App) {
 
 impl Render for TinyMd {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        window.set_window_title(&self.document.title());
+        let window_title = if cfg!(target_os = "windows") {
+            format!(
+                "{}{} — Tiny MD",
+                self.document.title(),
+                if self.dirty { " •" } else { "" }
+            )
+        } else {
+            self.document.title()
+        };
+        window.set_window_title(&window_title);
         window.set_window_edited(self.dirty);
         let menu_state = MenuState {
             source: self.source_mode,
@@ -775,6 +867,7 @@ impl Render for TinyMd {
             focus: self.focus_mode,
             typewriter: self.typewriter,
         };
+        #[cfg(not(target_os = "windows"))]
         if cx
             .active_window()
             .is_some_and(|handle| handle == window.window_handle())
@@ -792,23 +885,58 @@ impl Render for TinyMd {
                 cx.global_mut::<Session>().menu_state = Some(stamp);
             }
         }
+        #[cfg(target_os = "windows")]
+        let menu_bar = {
+            let recent = cx.global::<Session>().recent.clone();
+            if self
+                .menu_bar
+                .as_ref()
+                .is_none_or(|(state, paths, _)| *state != menu_state || *paths != recent)
+            {
+                // The menu bar snapshots get_menus() at creation. Each window needs
+                // its own snapshot, refreshed only when checks or recent files change.
+                menus::install(cx, menu_state, &recent);
+                self.menu_bar = Some((menu_state, recent, WindowsMenuBar::new(window, cx)));
+            }
+            self.menu_bar.as_ref().unwrap().2.clone()
+        };
         let surface = rgb(if self.dark { 0x222529 } else { 0xffffff });
         let ink = rgb(if self.dark { 0xe4e6e9 } else { 0x333333 });
         let muted = rgb(if self.dark { 0x989ea7 } else { 0x909090 });
         let border = rgb(if self.dark { 0x34383f } else { 0xeeeeee });
         let button =
             |id: &'static str, label: &'static str| Button::new(id).label(label).small().ghost();
-        let titlebar = TitleBar::new().bg(surface).border_b_0().pr(px(80.0)).child(
-            div()
-                .flex()
-                .flex_1()
-                .justify_center()
-                .items_center()
-                .text_size(px(13.0))
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(muted)
-                .child(self.document.title()),
-        );
+        let title_surface = if cfg!(target_os = "windows") && !self.dark {
+            rgb(0xf0f3f9)
+        } else {
+            surface
+        };
+        let titlebar = TitleBar::new()
+            .bg(title_surface)
+            .border_b_0()
+            .when(cfg!(target_os = "windows"), |bar| bar.h(px(28.0)))
+            .when(cfg!(target_os = "macos"), |bar| bar.pr(px(80.0)))
+            .child(
+                div()
+                    .flex()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .when(cfg!(target_os = "windows"), |title| title.pr_3().gap_2())
+                    .when(!cfg!(target_os = "windows"), |title| title.justify_center())
+                    .items_center()
+                    .text_size(px(13.0))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(if cfg!(target_os = "windows") && !self.dark {
+                        rgb(0x5d5b54)
+                    } else {
+                        muted
+                    })
+                    .when(cfg!(target_os = "windows"), |title| {
+                        title.child(img("app/window-icon.png").size(px(16.0)).flex_shrink_0())
+                    })
+                    .child(div().min_w_0().text_ellipsis().child(window_title)),
+            );
         let sidebar = self.sidebar_panel(cx);
         let mut search = div()
             .flex()
@@ -892,13 +1020,25 @@ impl Render for TinyMd {
                     .relative()
                     .min_w_0()
                     .justify_center()
-                    .px(px(32.0))
-                    .pt(px(32.0))
+                    .px(px(if cfg!(target_os = "windows") {
+                        12.0
+                    } else {
+                        32.0
+                    }))
+                    .pt(px(if cfg!(target_os = "windows") {
+                        16.0
+                    } else {
+                        32.0
+                    }))
                     .when(self.toolbar, |body| body.pb(px(72.0)))
                     .child(
                         div()
                             .w_full()
-                            .max_w(px(900.0))
+                            .max_w(px(if cfg!(target_os = "windows") {
+                                1080.0
+                            } else {
+                                900.0
+                            }))
                             .h_full()
                             .child(self.editor.clone()),
                     )
@@ -920,12 +1060,72 @@ impl Render for TinyMd {
             .items_center()
             .justify_between()
             .h(px(24.0))
+            .when(cfg!(target_os = "windows"), |footer| {
+                footer.h(px(28.0)).border_t_1().border_color(if self.dark {
+                    border
+                } else {
+                    rgb(0xe5e3df)
+                })
+            })
             .px_4()
             .text_size(px(11.0))
             .text_color(muted)
             .child(
                 div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .when(cfg!(target_os = "windows"), |footer| {
+                        footer
+                            .child(
+                                Button::new("footer-sidebar")
+                                    .icon(gpui_component::Icon::default().path("icons/sidebar.svg"))
+                                    .tooltip("显示 / 隐藏侧边栏（Ctrl+Shift+L）")
+                                    .small()
+                                    .ghost()
+                                    .h(px(22.0))
+                                    .w(px(26.0))
+                                    .tab_stop(false)
+                                    .selected(self.sidebar)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.sidebar = !this.sidebar;
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                Button::new("footer-source")
+                                    .icon(gpui_component::Icon::default().path("toolbar/code.svg"))
+                                    .tooltip(if self.source_mode {
+                                        "退出源代码模式（Ctrl+/）"
+                                    } else {
+                                        "启用源代码模式（Ctrl+/）"
+                                    })
+                                    .small()
+                                    .ghost()
+                                    .h(px(22.0))
+                                    .w(px(26.0))
+                                    .tab_stop(false)
+                                    .selected(self.source_mode)
+                                    .disabled(self.busy)
+                                    .on_click(
+                                        cx.listener(|this, _, w, cx| this.toggle_source(w, cx)),
+                                    ),
+                            )
+                    })
                     .text_color(if self.error { rgb(0xc45b51) } else { muted })
+                    .when(self.external_conflict, |footer| {
+                        footer.child(
+                            Button::new("resolve-sync-conflict")
+                                .label("处理同步冲突")
+                                .small()
+                                .ghost()
+                                .h(px(22.0))
+                                .disabled(self.busy)
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.resolve_external_conflict(None, window, cx);
+                                })),
+                        )
+                    })
                     .child(if self.error || self.busy {
                         self.status.clone()
                     } else {
@@ -950,7 +1150,7 @@ impl Render for TinyMd {
             .flex()
             .flex_col()
             .size_full()
-            .font_family(".AppleSystemUIFont")
+            .font_family(ui_font())
             .bg(surface)
             .text_color(ink)
             .capture_any_mouse_down(cx.listener(|_, _, window, cx| {
@@ -1095,6 +1295,18 @@ impl Render for TinyMd {
         ];
         macro_rules! recent { ($($action:ty => $index:expr),*) => { $(root = root.on_action(cx.listener(|this, _: &$action, w, cx| this.recent($index, w, cx)));)* }; }
         recent![Recent1 => 0, Recent2 => 1, Recent3 => 2, Recent4 => 3, Recent5 => 4];
+        #[cfg(target_os = "windows")]
+        {
+            macro_rules! menu_actions { ($($action:ty => $index:expr),* $(,)?) => {
+                $(root = root.on_action(cx.listener(|this, _: &$action, window, cx| {
+                    if let Some((_, _, menu)) = &this.menu_bar {
+                        menu.update(cx, |menu, cx| menu.open($index, window, cx));
+                    }
+                }));)*
+            }; }
+            menu_actions![OpenFileMenu => 0, OpenEditMenu => 1, OpenParagraphMenu => 2,
+                OpenFormatMenu => 3, OpenViewMenu => 4, OpenThemeMenu => 5, OpenHelpMenu => 6];
+        }
         macro_rules! edit_actions { ($($document:ty => $input:expr),*) => {
             $(root = root.on_action(cx.listener(|this, action: &$document, w, cx| this.route_edit(action, &$input, w, cx)));)*
         }; }
@@ -1106,8 +1318,22 @@ impl Render for TinyMd {
             guise::actions::Undo => gpui_component::input::Undo,
             guise::actions::Redo => gpui_component::input::Redo
         ];
-        root.child(titlebar)
-            .when(self.search_open, |root| root.child(search))
+        let root = root.child(titlebar);
+        #[cfg(target_os = "windows")]
+        let root = root.child(
+            div()
+                .id("windows-menu-row")
+                .flex()
+                .items_center()
+                .h(px(24.0))
+                .flex_shrink_0()
+                .px_2()
+                .bg(surface)
+                .border_b_1()
+                .border_color(if self.dark { border } else { rgb(0xe5e3df) })
+                .child(menu_bar),
+        );
+        root.when(self.search_open, |root| root.child(search))
             .child(body)
             .child(footer)
             .children(Root::render_dialog_layer(window, cx))
@@ -1155,7 +1381,9 @@ fn main() {
             app_icon::install();
             gpui_component::init(cx);
             gpui_component::Theme::change(gpui_component::ThemeMode::Light, None, cx);
-            guise::Theme::light().init(cx);
+            #[cfg(target_os = "windows")]
+            apply_windows_theme(false, cx);
+            guise_theme(false).init(cx);
             cx.set_global(Session::default());
             menus::bind(cx);
             menus::install(cx, MenuState::default(), &[]);
@@ -1184,6 +1412,7 @@ fn main() {
             cx.on_action(|_: &HideOthers, cx| cx.hide_other_apps());
             cx.on_action(|_: &ShowAll, cx| cx.unhide_other_apps());
             menus::register_forwarding(cx);
-            open_editor_window(initial, false, cx);
+            let empty = cfg!(target_os = "windows") && initial.is_none();
+            open_editor_window(initial, empty, cx);
         });
 }

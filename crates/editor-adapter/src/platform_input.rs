@@ -72,6 +72,7 @@ impl EntityInputHandler for MarkdownEditor {
             return;
         }
         self.ime.update(&mut self.model, range, text, selected);
+        self.caret.reset();
         self.scroll_to_cursor = true;
         cx.notify(); // Provisional input must not emit a document Change.
     }

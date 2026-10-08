@@ -3,11 +3,13 @@
 //! The editor view is a small, attributed fork. Its model, Markdown parsing,
 //! source mapping and theme remain supplied by Guise; code highlighting uses
 //! Syntect grammars with Guise's theme palette.
+mod caret;
 mod chord;
 mod code_blocks;
 mod commands;
 mod diagrams;
 mod editmenu;
+mod external_text;
 mod ime;
 mod markdown_editor;
 mod syntax;

@@ -1,7 +1,7 @@
 # tiny-md
 
 使用 Rust、GPUI、GPUI Component 和 Guise 构建的原生 Markdown 写作应用。
-首个开发版本面向 macOS。
+支持 macOS 与 Windows x64 的原生写作界面。
 
 ## 运行
 
@@ -21,17 +21,34 @@ sh scripts/bundle-macos.sh --launch
 
 输出为 `target/Tiny MD.app`。这是本机开发包，尚未签名、公证或制作发行安装包。
 
+Windows 需要 Rust stable MSVC、Visual Studio C++ x64 构建工具及 Windows SDK：
+
+```powershell
+./scripts/run-windows.ps1
+./scripts/run-windows.ps1 -Document './fixtures/tables.md'
+./scripts/check.ps1
+./scripts/bundle-windows.ps1 -Portable
+```
+
+脚本自动加载编译器环境。Windows 操作使用 Ctrl 快捷键，例如 Ctrl+S 保存、Ctrl+H 替换、
+Ctrl+Y 重做、F11 全屏。窗口内菜单、标题栏按钮与系统字体已按 `notion` 风格接入。
+Windows 无文件启动时显示空白文档，布局按提供的 Typora 参考；底栏提供侧栏与源码按钮，
+排版工具栏从“视图 → 工具栏”打开。可双击的优化版位于 `target/windows/Tiny MD/tiny-md.exe`。
+顶部菜单提供 `文件(F)` 等 Alt 访问键提示，F10 打开文件菜单；下拉项目显示实际绑定的快捷键。
+详见 [Windows 说明](docs/05-operations/windows.md) 和 [文档索引](docs/README.md)。
+
 应用图标位于 `assets/icons/`：白色圆角底、深色衬线 T 和浅灰文字行。
 macOS 打包脚本会复制 `.icns` 并设置 `CFBundleIconFile`；Windows 构建脚本会将
 多尺寸 `.ico` 嵌入 `tiny-md.exe`，需要 Windows SDK 的 `rc.exe` 或 GNU `windres`。
-Windows 图标资源已配置，应用的平台适配仍待验证。
+Windows 图标资源、快捷键和文件操作已通过本机自动检查；原生交互仍待验收。
 在 macOS 上运行 `sh scripts/build-icons.sh` 可从源图重新导出 PNG、ICNS 和 ICO。
 macOS 启动时也会加载程序内嵌的 `.icns`，因此 `cargo run` 直接运行时会显示相同的 Dock 图标。
 
 ## 当前能力
 
-- 简洁写作窗口、居中的文档标题与正文，默认隐藏工具栏和侧栏。
-  文件、编辑、段落、格式、显示、主题、窗口和帮助操作使用 macOS 顶部原生菜单。
+- 简洁写作窗口、居中的正文，默认隐藏排版工具栏和侧栏；macOS 文档标题居中，Windows 应用标题位于左侧。
+  文件、编辑、段落、格式、显示、主题、窗口和帮助操作使用 macOS 顶部原生菜单；
+  Windows 使用窗口内菜单。
 - 文档列表 / 文档树支持右键菜单：打开、新窗口打开、新建、搜索、文件简介、重命名、
   创建副本、删除到系统废纸篓 / 回收站、复制路径和文件管理器定位。
   文档树以当前目录名称为根节点，文件夹和文件带图标、按目录层级缩进，可展开 / 折叠；
@@ -63,7 +80,9 @@ macOS 启动时也会加载程序内嵌的 `.icns`，因此 `cargo run` 直接�
 - GPUI 原生输入法接口，UTF-16 位置转换、组合输入和一次提交对应一次撤销。
 - 普通方向键和删除按 Unicode 字素操作，保持组合 emoji 和附加符号完整。
 - 后台文件读写，同目录临时文件原子替换，保存失败时保留编辑内容。
-- 保留已打开文件的 UTF-8 BOM 和统一 CRLF；外部修改后的文件拒绝直接覆盖。
+- 保留已打开文件的 UTF-8 BOM 和统一 CRLF；约每秒同步其他应用的修改，保存前再核对并合并。
+  未修改的文档自动更新，不重叠的本地修改自动合并；重叠冲突保留内容，提供另存本地副本或同步磁盘版本。
+- 光标使用正文颜色并闪烁，引用块使用灰色竖线与灰色文字。
 
 输入法实现有自动回归验证；真实系统中文候选、组合输入和候选框位置的验收状态见
 [验证记录](docs/verification.md)。
@@ -127,12 +146,13 @@ sh scripts/check.sh
 ```
 
 测试重点：组合输入提交与取消、选区替换、UTF-16/emoji 边界、撤销历史、文件保存失败、
-外部修改保护、Markdown 大纲过滤、表格源码映射与单元格导航。
+外部修改合并与冲突保护、同步后的撤销与选区保留、Markdown 大纲过滤、表格源码映射与单元格导航。
 
 ## 尚待实现
 
 图片内嵌预览与拖放、标签页、导出 / 打印、自动保存与崩溃恢复、设置持久化、
-数学公式、脚注和其他平台适配。最近文件和显示设置目前只保留在本次应用会话。
+数学公式、脚注和 Linux 等其他平台适配。最近文件和显示设置目前只保留在本次应用会话。
 
 当前大纲只提取 ATX 标题；混合换行的文件在修改后保存时统一为 LF。
-外部修改保护是保存前检查，尚不包含持续文件监听与自动合并。
+外部修改采用后台轮询与按行三方合并；同一行的重叠修改需要人工处理。
+机制及验收规则见 [外部文件同步](docs/02-design/external-file-sync.md)。

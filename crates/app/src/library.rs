@@ -150,6 +150,33 @@ pub fn named_path(directory: &Path, name: &str) -> io::Result<PathBuf> {
             "请输入有效的文件名，不要包含路径或特殊字符。",
         ));
     }
+    #[cfg(target_os = "windows")]
+    {
+        // Device names stay reserved even with an extension. Win32 also ignores
+        // spaces before the extension, and accepts superscript digits as ports.
+        let base = name
+            .split('.')
+            .next()
+            .unwrap_or_default()
+            .trim_end()
+            .to_uppercase();
+        let port = base
+            .strip_prefix("COM")
+            .or_else(|| base.strip_prefix("LPT"));
+        if matches!(base.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+            || port.is_some_and(|number| {
+                matches!(
+                    number,
+                    "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"
+                )
+            })
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "此文件名由 Windows 保留，请使用其他名称。",
+            ));
+        }
+    }
     let mut path = directory.join(name);
     if path.extension().is_none() {
         path.set_extension("md");
@@ -237,6 +264,29 @@ pub fn rename_file(path: &Path, target: &Path) -> io::Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_device_names_are_rejected_before_filesystem_operations() {
+        for invalid in [
+            "CON",
+            "nul.md",
+            "PRN.markdown",
+            "AUX",
+            "COM1.md",
+            "LPT9.mdown",
+            "con .md",
+            "COM¹.md",
+        ] {
+            assert!(
+                named_path(Path::new("notes"), invalid).is_err(),
+                "accepted {invalid}"
+            );
+        }
+        assert_eq!(
+            named_path(Path::new("notes"), "console.md").unwrap(),
+            Path::new("notes").join("console.md")
+        );
+    }
     #[test]
     fn file_operations_never_replace_existing_documents_and_preserve_bytes() {
         let dir = tempfile::tempdir().unwrap();

@@ -22,6 +22,7 @@
 //! .detach();
 //! ```
 
+use crate::caret::CaretBlink;
 use crate::chord::Chord;
 use crate::code_blocks;
 use crate::diagrams::{self, DiagramKey, DiagramState, DiagramView};
@@ -34,8 +35,8 @@ use gpui::{
     App, Bounds, ClipboardItem, Context, Div, DragMoveEvent, ElementInputHandler, Empty, Entity,
     EntityId, EventEmitter, FocusHandle, Font, FontStyle, FontWeight, Hsla, IntoElement,
     KeyDownEvent, MouseButton, MouseDownEvent, Pixels, ScrollHandle, SharedString,
-    StrikethroughStyle, TextAlign, TextRun, UnderlineStyle, Window, WrappedLine, canvas, div, img,
-    point, px,
+    StrikethroughStyle, Task, TextAlign, TextRun, UnderlineStyle, Window, WrappedLine, canvas, div,
+    img, point, px,
 };
 use guise::actions;
 use guise::overlay::ContextMenu;
@@ -50,7 +51,13 @@ use guise::theme::theme;
 use guise::{Glyph, IconName};
 
 /// The monospace family for code spans and code blocks.
-const MONO_FAMILY: &str = "Menlo";
+const MONO_FAMILY: &str = if cfg!(target_os = "macos") {
+    "Menlo"
+} else if cfg!(target_os = "windows") {
+    "Consolas"
+} else {
+    "DejaVu Sans Mono"
+};
 /// Horizontal padding around the document, in px.
 const PAD_X: f32 = 16.0;
 /// Vertical padding above and below the document, in px.
@@ -84,14 +91,28 @@ struct MarkdownDrag(EntityId);
 pub struct MarkdownStyle {
     /// Paint no frame border and no corner radius (an embedded surface).
     pub bare: bool,
+    /// Reduce display heading padding without changing text or cursor positions.
+    pub compact_headings: bool,
     pub bg: Option<Hsla>,
     pub text: Option<Hsla>,
     pub caret: Option<Hsla>,
+    pub quote_text: Option<Hsla>,
+    pub quote_bar: Option<Hsla>,
     pub selection: Option<Hsla>,
-    /// Links, bullets, checked boxes, quote bars.
+    /// Links, bullets and checked boxes.
     pub accent: Option<Hsla>,
     pub code_bg: Option<Hsla>,
     pub placeholder: Option<Hsla>,
+}
+
+fn row_padding(kind: &RowKind, compact: bool) -> (f32, f32) {
+    let m = metrics(kind);
+    let factor = if compact && matches!(kind, RowKind::Heading(_)) {
+        0.6
+    } else {
+        1.0
+    };
+    (m.pad_top * factor, m.pad_bottom * factor)
 }
 
 /// One laid-out source line: its plan, shaped text, and geometry. Rebuilt
@@ -417,6 +438,8 @@ pub struct MarkdownEditor {
     rows: Option<usize>,
     style: MarkdownStyle,
     focus: FocusHandle,
+    caret: CaretBlink,
+    _caret_task: Task<()>,
     /// The right-click Cut / Copy / Paste menu, built on each right-click.
     menu: Option<Entity<ContextMenu>>,
     scroll: ScrollHandle,
@@ -449,6 +472,22 @@ impl MarkdownEditor {
             ]);
             cx.set_global(EditorKeyBindings);
         }
+        let executor = cx.background_executor().clone();
+        let caret_task = cx.spawn(async move |this, cx| {
+            loop {
+                executor.timer(std::time::Duration::from_millis(100)).await;
+                if this
+                    .update(cx, |this, cx| {
+                        if this.caret.tick(this.ime.active()) {
+                            cx.notify();
+                        }
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
         MarkdownEditor {
             model: EditorModel::new(""),
             ime: ImeState::default(),
@@ -461,6 +500,8 @@ impl MarkdownEditor {
             rows: None,
             style: MarkdownStyle::default(),
             focus: cx.focus_handle(),
+            caret: CaretBlink::default(),
+            _caret_task: caret_task,
             menu: None,
             scroll: ScrollHandle::new(),
             text_bounds: Bounds::default(),
@@ -570,6 +611,7 @@ impl MarkdownEditor {
 
     /// Replace the document, resetting cursor, selection, and history.
     pub fn set_text(&mut self, value: &str, cx: &mut Context<Self>) {
+        self.caret.reset();
         self.copied_block = None;
         self.diagrams.clear();
         self.diagram_views.clear();
@@ -580,6 +622,23 @@ impl MarkdownEditor {
         self.scroll_to_cursor = true;
         self.goal_x = None;
         cx.notify();
+    }
+
+    /// Apply a disk update as one undoable edit, retaining selection and scroll.
+    /// Hosts must retry later while the platform owns an IME composition.
+    pub fn apply_external_text(&mut self, value: &str, cx: &mut Context<Self>) -> bool {
+        if self.ime.active() {
+            return false;
+        }
+        if self.model.text() != value {
+            crate::external_text::apply(&mut self.model, value);
+            self.copied_block = None;
+            self.goal_x = None;
+            self.caret.reset();
+            cx.emit(MarkdownEditorEvent::Change(self.model.text()));
+            cx.notify();
+        }
+        true
     }
 
     /// The editor's focus handle, so a host can focus it on open.
@@ -743,6 +802,7 @@ impl MarkdownEditor {
     /// [`MarkdownEditorEvent::Change`] when the text changed, keeps the
     /// caret visible, and repaints.
     pub fn edit<R>(&mut self, cx: &mut Context<Self>, f: impl FnOnce(&mut EditorModel) -> R) -> R {
+        self.caret.reset();
         self.finish_composition(cx);
         let before = self.model.text();
         let result = f(&mut self.model);
@@ -998,6 +1058,7 @@ impl MarkdownEditor {
     // input handling
 
     fn on_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        self.caret.reset();
         if editmenu::is_open(&self.menu, cx) {
             return;
         }
@@ -1230,10 +1291,10 @@ impl MarkdownEditor {
         let start = ime::pos_utf16(&self.model, range.start);
         let end = ime::pos_utf16(&self.model, range.end);
         if start.line != end.line
-            || !self
+            || self
                 .layout
                 .get(start.line)
-                .is_some_and(|row| !row.cells.is_empty())
+                .is_none_or(|row| row.cells.is_empty())
         {
             return text.to_owned();
         }
@@ -1274,6 +1335,7 @@ impl MarkdownEditor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.caret.reset();
         self.finish_composition(cx);
         window.focus(&self.focus);
         if self.model.selection().is_none() {
@@ -1291,6 +1353,7 @@ impl MarkdownEditor {
     }
 
     fn on_mouse_down(&mut self, ev: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        self.caret.reset();
         self.finish_composition(cx);
         window.focus(&self.focus);
         self.goal_x = None;
@@ -1355,6 +1418,7 @@ impl MarkdownEditor {
         let y = f32::from(ev.event.position.y) - f32::from(self.text_bounds.origin.y);
         let (line, col) = self.hit(x, y);
         self.model.move_to(line, col, true);
+        self.caret.reset();
         self.scroll_to_cursor = true;
         cx.notify();
     }
@@ -1447,6 +1511,7 @@ impl MarkdownEditor {
     }
 
     fn after_edit(&mut self, cx: &mut Context<Self>) {
+        self.caret.reset();
         cx.emit(MarkdownEditorEvent::Change(self.model.text()));
         self.scroll_to_cursor = true;
         cx.notify();
@@ -1454,6 +1519,7 @@ impl MarkdownEditor {
     }
 
     fn after_move(&mut self, cx: &mut Context<Self>) {
+        self.caret.reset();
         self.normalize_heading_cursor();
         self.scroll_to_cursor = true;
         cx.notify();
@@ -1506,6 +1572,11 @@ impl MarkdownEditor {
 impl Render for MarkdownEditor {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let focused = self.focus.is_focused(window);
+        let caret_focused = focused && window.is_window_active() && !self.read_only;
+        if caret_focused && !self.caret.focused {
+            self.caret.reset();
+        }
+        self.caret.focused = caret_focused;
         let base = self.font_size;
 
         let t = theme(cx);
@@ -1521,7 +1592,7 @@ impl Render for MarkdownEditor {
         let dimmed = t.dimmed().hsla();
         let marker_color = t.dimmed().alpha(0.75);
         let accent = style.accent.unwrap_or_else(|| t.primary().hsla());
-        let caret_color = style.caret.unwrap_or(accent);
+        let caret_color = style.caret.unwrap_or(text_color);
         let selection_bg = style.selection.unwrap_or_else(|| t.primary().alpha(0.25));
         let code_bg = style
             .code_bg
@@ -1531,7 +1602,8 @@ impl Render for MarkdownEditor {
             .alpha(if is_dark { 0.45 } else { 0.7 });
         let placeholder_color = style.placeholder.unwrap_or_else(|| t.dimmed().hsla());
         let rule_color = t.border().hsla();
-        let quote_bar = t.primary().alpha(0.55);
+        let quote_bar = style.quote_bar.unwrap_or(rule_color);
+        let quote_text = style.quote_text.unwrap_or(dimmed);
         let radius = t.radius(t.default_radius);
         let token_colors: [Hsla; 8] = TokenKind::ALL.map(|kind| token_color(kind, t));
 
@@ -1557,7 +1629,7 @@ impl Render for MarkdownEditor {
             Some((s, e)) => Some((s.line, e.line)),
             None => Some((cursor.line, cursor.line)),
         };
-        let show_caret = focused && !self.read_only;
+        let show_caret = caret_focused && (self.caret.visible || self.ime.active());
         let marked = self.ime.marked().map(|range| {
             (
                 ime::pos_utf16(&self.model, range.start),
@@ -1709,7 +1781,8 @@ impl Render for MarkdownEditor {
                 RowKind::Heading(3) => 1.35,
                 _ => m.scale,
             };
-            let (lh, pt, pb) = (m.line_height, m.pad_top, m.pad_bottom);
+            let lh = m.line_height;
+            let (pt, pb) = row_padding(&plan.kind, style.compact_headings);
             let size = (base * scale).round();
             let line_h = (size * lh).round();
             let mut pad_top = (base * pt).round();
@@ -1810,6 +1883,8 @@ impl Render for MarkdownEditor {
                             dimmed
                         } else if s.link {
                             accent
+                        } else if matches!(plan.kind, RowKind::Quote { .. }) {
+                            quote_text
                         } else {
                             text_color
                         };
@@ -2479,9 +2554,9 @@ impl Render for MarkdownEditor {
                 el = el.child(
                     div()
                         .absolute()
-                        .left(px((row.inset + x - 1.0).max(0.0)))
+                        .left(px((row.inset + x).max(0.0)))
                         .top(px(row.pad_top + vrow as f32 * row.line_h))
-                        .w(px(2.0))
+                        .w(px(1.0))
                         .h(px(row.line_h))
                         .bg(caret_color),
                 );
@@ -2735,6 +2810,24 @@ fn scroll_adjust(offset: f32, view: f32, top: f32, bottom: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compact_headings_reduce_whitespace_and_preserve_other_block_spacing() {
+        for level in 1..=6 {
+            let kind = RowKind::Heading(level);
+            let normal = row_padding(&kind, false);
+            let compact = row_padding(&kind, true);
+            assert!(compact.0 + compact.1 < (normal.0 + normal.1) * 0.75);
+        }
+        for kind in [
+            RowKind::Blank,
+            RowKind::Paragraph,
+            RowKind::Table,
+            RowKind::FrontMatter,
+        ] {
+            assert_eq!(row_padding(&kind, false), row_padding(&kind, true));
+        }
+    }
 
     #[test]
     fn continuation_markers() {

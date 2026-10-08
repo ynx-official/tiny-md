@@ -5,6 +5,11 @@ pub struct Assets;
 
 impl AssetSource for Assets {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
+        if path == "app/window-icon.png" {
+            return Ok(Some(Cow::Borrowed(include_bytes!(
+                "../../../assets/icons/tiny-md.png"
+            ))));
+        }
         let strokes = match path {
             "icons/chevron-down.svg" => "<path d='m6 9 6 6 6-6'/>",
             "icons/chevron-right.svg" => "<path d='m9 6 6 6-6 6'/>",
@@ -17,6 +22,15 @@ impl AssetSource for Assets {
             }
             "icons/check.svg" => "<path d='m4 12 5 5 11-11'/>",
             "icons/close.svg" => "<path d='m6 6 12 12M6 18 18 6'/>",
+            "icons/window-minimize.svg" => "<path d='M6 12h12'/>",
+            "icons/window-maximize.svg" => "<rect x='6' y='6' width='12' height='12'/>",
+            "icons/window-restore.svg" => {
+                "<path d='M9 6V3h12v12h-3'/><rect x='3' y='9' width='12' height='12'/>"
+            }
+            "icons/window-close.svg" => "<path d='m6 6 12 12M6 18 18 6'/>",
+            "icons/sidebar.svg" => {
+                "<rect x='3' y='4' width='18' height='16' rx='2'/><path d='M9 4v16'/>"
+            }
             "icons/copy.svg" => {
                 "<rect x='8' y='8' width='12' height='13' rx='2'/><path d='M16 8V3H3v13h5'/>"
             }
@@ -43,5 +57,30 @@ impl AssetSource for Assets {
 
     fn list(&self, _: &str) -> Result<Vec<SharedString>> {
         Ok(vec![])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui_component::{IconName, IconNamed};
+
+    #[test]
+    fn windows_titlebar_controls_have_embedded_svg_assets() {
+        for icon in [
+            IconName::WindowMinimize,
+            IconName::WindowMaximize,
+            IconName::WindowRestore,
+            IconName::WindowClose,
+        ] {
+            let path = icon.path();
+            let asset = Assets
+                .load(path.as_ref())
+                .unwrap()
+                .unwrap_or_else(|| panic!("missing {path}"));
+            let svg = std::str::from_utf8(&asset).unwrap();
+            assert!(svg.starts_with("<svg"));
+            assert!(svg.contains("viewBox='0 0 24 24'"));
+        }
     }
 }

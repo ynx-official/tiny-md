@@ -93,7 +93,14 @@ actions!(
         ZoomWindow,
         Fullscreen,
         WordCount,
-        QuickStart
+        QuickStart,
+        OpenFileMenu,
+        OpenEditMenu,
+        OpenParagraphMenu,
+        OpenFormatMenu,
+        OpenViewMenu,
+        OpenThemeMenu,
+        OpenHelpMenu
     ]
 );
 
@@ -119,6 +126,20 @@ fn checked(label: &str, enabled: bool) -> String {
 }
 
 pub fn install(cx: &App, state: MenuState, recent: &[std::path::PathBuf]) {
+    cx.set_menus(build(state, recent, cfg!(target_os = "macos")));
+}
+
+pub(crate) fn reveal_label() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "在 Finder 中显示"
+    } else if cfg!(target_os = "windows") {
+        "在资源管理器中显示"
+    } else {
+        "在文件管理器中显示"
+    }
+}
+
+fn build(state: MenuState, recent: &[std::path::PathBuf], mac: bool) -> Vec<Menu> {
     let recent_actions: Vec<Box<dyn Action>> = vec![
         Box::new(Recent1),
         Box::new(Recent2),
@@ -135,7 +156,7 @@ pub fn install(cx: &App, state: MenuState, recent: &[std::path::PathBuf]) {
             os_action: None,
         })
         .collect();
-    cx.set_menus(vec![
+    let mut menus = vec![
         Menu {
             name: "Tiny MD".into(),
             items: vec![
@@ -166,7 +187,14 @@ pub fn install(cx: &App, state: MenuState, recent: &[std::path::PathBuf]) {
                 MenuItem::action("保存", SaveDocument),
                 MenuItem::action("另存为…", SaveDocumentAs),
                 MenuItem::action("从磁盘重新加载", ReloadDocument),
-                MenuItem::action("在 Finder 中显示", RevealDocument),
+                MenuItem::action(
+                    if mac {
+                        "在 Finder 中显示"
+                    } else {
+                        "在资源管理器中显示"
+                    },
+                    RevealDocument,
+                ),
                 MenuItem::separator(),
                 MenuItem::action("关闭", CloseDocument),
             ],
@@ -319,19 +347,67 @@ pub fn install(cx: &App, state: MenuState, recent: &[std::path::PathBuf]) {
                 MenuItem::action("关于 Tiny MD", About),
             ],
         },
-    ]);
+    ];
+    if !mac {
+        // Windows has no global application menu or macOS Services/Hide actions.
+        menus.remove(0);
+        menus[0].items.extend([
+            MenuItem::separator(),
+            MenuItem::action("退出 Tiny MD", QuitApplication),
+        ]);
+        // Windows exposes window controls in its titlebar. Keep the compact
+        // seven-menu layout requested for the writing window.
+        menus.retain(|menu| menu.name != "窗口");
+        if let Some(view) = menus.iter_mut().find(|menu| menu.name == "显示") {
+            view.name = "视图".into();
+        }
+        for (menu, access) in menus.iter_mut().zip(['F', 'E', 'P', 'O', 'V', 'T', 'H']) {
+            menu.name = format!("{}({access})", menu.name).into();
+        }
+    }
+    menus
 }
 
 pub fn bind(cx: &mut App) {
-    cx.bind_keys([
-        KeyBinding::new("cmd-n", NewDocument, None),
-        KeyBinding::new("cmd-shift-n", NewWindow, None),
-        KeyBinding::new("cmd-o", OpenDocument, None),
-        KeyBinding::new("cmd-q", QuitApplication, None),
-        KeyBinding::new("cmd-h", Hide, None),
-        KeyBinding::new("cmd-alt-h", HideOthers, None),
-    ]);
-    macro_rules! keys { ($($key:literal => $action:expr),* $(,)?) => { cx.bind_keys([$ (KeyBinding::new($key, $action, Some("TinyMd"))),*]); }; }
+    cx.bind_keys(bindings(cfg!(target_os = "macos")));
+}
+
+fn platform_binding<A: Action>(
+    key: &str,
+    action: A,
+    context: Option<&str>,
+    mac: bool,
+) -> KeyBinding {
+    let key = if mac {
+        key.to_owned()
+    } else {
+        match key {
+            // A literal Cmd -> Ctrl substitution would merge these with heading
+            // shortcuts and leave the Windows key in other compound gestures.
+            "ctrl-cmd-1" => "ctrl-alt-1".into(),
+            "ctrl-cmd-2" => "ctrl-alt-2".into(),
+            "ctrl-cmd-f" => "f11".into(),
+            "cmd-alt-f" => "ctrl-h".into(),
+            _ => key.replace("cmd-", "ctrl-"),
+        }
+    };
+    KeyBinding::new(&key, action, context)
+}
+
+fn bindings(mac: bool) -> Vec<KeyBinding> {
+    let mut bindings = vec![
+        platform_binding("cmd-n", NewDocument, None, mac),
+        platform_binding("cmd-shift-n", NewWindow, None, mac),
+        platform_binding("cmd-o", OpenDocument, None, mac),
+        platform_binding("cmd-q", QuitApplication, None, mac),
+    ];
+    if mac {
+        bindings.extend([
+            KeyBinding::new("cmd-h", Hide, None),
+            KeyBinding::new("cmd-alt-h", HideOthers, None),
+        ]);
+    }
+    macro_rules! keys { ($($key:literal => $action:expr),* $(,)?) => { bindings.extend([$ (platform_binding($key, $action, Some("TinyMd"), mac)),*]); }; }
     keys![
         "cmd-n" => NewDocument, "cmd-shift-n" => NewWindow, "cmd-o" => OpenDocument,
         "cmd-s" => SaveDocument, "cmd-shift-s" => SaveDocumentAs,
@@ -352,15 +428,43 @@ pub fn bind(cx: &mut App) {
         "cmd-shift-=" => ZoomIn, "cmd-shift--" => ZoomOut, "cmd-shift-0" => ActualSize,
         "cmd-m" => Minimize, "ctrl-cmd-f" => Fullscreen,
     ];
-    cx.bind_keys([
-        KeyBinding::new("cmd-z", guise::actions::Undo, Some("TinyMdMarkdown")),
-        KeyBinding::new("cmd-shift-z", guise::actions::Redo, Some("TinyMdMarkdown")),
-        KeyBinding::new("cmd-x", guise::actions::Cut, Some("TinyMdMarkdown")),
-        KeyBinding::new("cmd-c", guise::actions::Copy, Some("TinyMdMarkdown")),
-        KeyBinding::new("cmd-v", guise::actions::Paste, Some("TinyMdMarkdown")),
-        KeyBinding::new("cmd-a", guise::actions::SelectAll, Some("TinyMdMarkdown")),
+    bindings.extend([
+        platform_binding("cmd-z", guise::actions::Undo, Some("TinyMdMarkdown"), mac),
+        platform_binding(
+            "cmd-shift-z",
+            guise::actions::Redo,
+            Some("TinyMdMarkdown"),
+            mac,
+        ),
+        platform_binding("cmd-x", guise::actions::Cut, Some("TinyMdMarkdown"), mac),
+        platform_binding("cmd-c", guise::actions::Copy, Some("TinyMdMarkdown"), mac),
+        platform_binding("cmd-v", guise::actions::Paste, Some("TinyMdMarkdown"), mac),
+        platform_binding(
+            "cmd-a",
+            guise::actions::SelectAll,
+            Some("TinyMdMarkdown"),
+            mac,
+        ),
         KeyBinding::new("escape", CloseSearch, Some("TinyMd")),
     ]);
+    if !mac {
+        bindings.extend([
+            KeyBinding::new("alt-f", OpenFileMenu, Some("TinyMd")),
+            KeyBinding::new("alt-e", OpenEditMenu, Some("TinyMd")),
+            KeyBinding::new("alt-p", OpenParagraphMenu, Some("TinyMd")),
+            KeyBinding::new("alt-o", OpenFormatMenu, Some("TinyMd")),
+            KeyBinding::new("alt-v", OpenViewMenu, Some("TinyMd")),
+            KeyBinding::new("alt-t", OpenThemeMenu, Some("TinyMd")),
+            KeyBinding::new("alt-h", OpenHelpMenu, Some("TinyMd")),
+            KeyBinding::new("f10", OpenFileMenu, Some("TinyMd")),
+        ]);
+        bindings.push(KeyBinding::new(
+            "ctrl-y",
+            guise::actions::Redo,
+            Some("TinyMdMarkdown"),
+        ));
+    }
+    bindings
 }
 
 pub fn register_forwarding(cx: &mut App) {
@@ -457,4 +561,108 @@ pub fn register_forwarding(cx: &mut App) {
         guise::actions::Undo,
         guise::actions::Redo,
     ];
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use core::prelude::v1::test;
+
+    #[test]
+    fn windows_menu_access_keys_match_visible_hints_and_do_not_affect_mac_option_keys() {
+        let menus = build(MenuState::default(), &[], false);
+        assert_eq!(
+            menus
+                .iter()
+                .map(|menu| menu.name.as_ref())
+                .collect::<Vec<_>>(),
+            [
+                "文件(F)",
+                "编辑(E)",
+                "段落(P)",
+                "格式(O)",
+                "视图(V)",
+                "主题(T)",
+                "帮助(H)"
+            ]
+        );
+        for (key, action) in [
+            ("alt-f", Box::new(OpenFileMenu) as Box<dyn Action>),
+            ("alt-e", Box::new(OpenEditMenu)),
+            ("alt-p", Box::new(OpenParagraphMenu)),
+            ("alt-o", Box::new(OpenFormatMenu)),
+            ("alt-v", Box::new(OpenViewMenu)),
+            ("alt-t", Box::new(OpenThemeMenu)),
+            ("alt-h", Box::new(OpenHelpMenu)),
+        ] {
+            assert!(
+                has_binding(&bindings(false), key, action.as_ref()),
+                "missing {key}"
+            );
+            assert!(
+                !has_binding(&bindings(true), key, action.as_ref()),
+                "reserved mac Option chord {key}"
+            );
+        }
+    }
+
+    fn has_binding(bindings: &[KeyBinding], chord: &str, action: &dyn Action) -> bool {
+        let stroke = Keystroke::parse(chord).unwrap();
+        bindings.iter().any(|binding| {
+            binding.action().partial_eq(action)
+                && binding.match_keystrokes(std::slice::from_ref(&stroke)) == Some(false)
+        })
+    }
+
+    #[test]
+    fn windows_shortcuts_use_control_and_keep_sidebar_and_heading_actions_distinct() {
+        let keys = bindings(false);
+        for (chord, action) in [
+            ("ctrl-s", Box::new(SaveDocument) as Box<dyn Action>),
+            ("ctrl-shift-s", Box::new(SaveDocumentAs)),
+            ("ctrl-n", Box::new(NewDocument)),
+            ("ctrl-shift-n", Box::new(NewWindow)),
+            ("ctrl-o", Box::new(OpenDocument)),
+            ("ctrl-w", Box::new(CloseDocument)),
+            ("ctrl-h", Box::new(Replace)),
+            ("ctrl-alt-1", Box::new(ShowOutline)),
+            ("ctrl-1", Box::new(Heading1)),
+            ("f11", Box::new(Fullscreen)),
+            ("ctrl-y", Box::new(guise::actions::Redo)),
+            ("ctrl-shift-z", Box::new(guise::actions::Redo)),
+            ("ctrl-c", Box::new(guise::actions::Copy)),
+        ] {
+            assert!(
+                has_binding(&keys, chord, action.as_ref()),
+                "missing {chord}"
+            );
+        }
+        assert!(!keys.iter().any(|binding| has_binding(
+            std::slice::from_ref(binding),
+            "ctrl-h",
+            &Hide
+        )));
+    }
+
+    #[test]
+    fn mac_shortcuts_keep_command_and_native_hide_actions() {
+        let keys = bindings(true);
+        assert!(has_binding(&keys, "cmd-s", &SaveDocument));
+        assert!(has_binding(&keys, "cmd-h", &Hide));
+        assert!(has_binding(&keys, "cmd-alt-f", &Replace));
+        assert!(has_binding(&keys, "ctrl-cmd-1", &ShowOutline));
+    }
+
+    #[test]
+    fn windows_menus_expose_quit_and_explorer_without_mac_system_items() {
+        let menus = build(MenuState::default(), &[], false);
+        assert!(!menus.iter().any(|menu| menu.name == "Tiny MD"));
+        let file = menus.iter().find(|menu| menu.name == "文件(F)").unwrap();
+        assert!(file.items.iter().any(|item| matches!(item,
+            MenuItem::Action { action, .. } if action.partial_eq(&QuitApplication))));
+        assert!(file.items.iter().any(|item| matches!(item,
+            MenuItem::Action { name, .. } if name == "在资源管理器中显示")));
+        let mac_menus = build(MenuState::default(), &[], true);
+        assert_eq!(mac_menus[0].name, "Tiny MD");
+    }
 }

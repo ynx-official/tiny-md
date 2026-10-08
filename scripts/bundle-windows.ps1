@@ -1,9 +1,11 @@
 param(
-    [string]$Version = ''
+    [string]$Version = '',
+    [switch]$Portable
 )
 
 $ErrorActionPreference = 'Stop'
 Set-Location (Join-Path $PSScriptRoot '..')
+. (Join-Path $PSScriptRoot 'setup-windows.ps1')
 
 if (!$Version) {
     $package = cargo pkgid -p tiny-md
@@ -21,22 +23,17 @@ cargo build --locked --release -p tiny-md --target x86_64-pc-windows-msvc
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 $executable = 'target/x86_64-pc-windows-msvc/release/tiny-md.exe'
-$bytes = [System.IO.File]::ReadAllBytes((Resolve-Path $executable))
-if ($bytes.Length -lt 64 -or [BitConverter]::ToUInt16($bytes, 0) -ne 0x5A4D) {
-    throw 'The Windows executable is not a PE file'
-}
-$peOffset = [BitConverter]::ToInt32($bytes, 0x3C)
-if ($peOffset -lt 0 -or $peOffset -gt $bytes.Length - 6 -or
-    [BitConverter]::ToUInt32($bytes, $peOffset) -ne 0x00004550 -or
-    [BitConverter]::ToUInt16($bytes, $peOffset + 4) -ne 0x8664) {
-    throw 'The Windows executable is not x64'
-}
+& (Join-Path $PSScriptRoot 'verify-windows-exe.ps1') -Path $executable
 
 $bundle = 'target/windows/Tiny MD'
 New-Item -ItemType Directory -Force -Path $bundle, 'target/release-assets' | Out-Null
 Copy-Item -LiteralPath $executable -Destination "$bundle/tiny-md.exe" -Force
 Copy-Item -LiteralPath 'fixtures/welcome.md' -Destination "$bundle/welcome.md" -Force
 Set-Content -LiteralPath "$bundle/version.txt" -Value $Version -Encoding utf8
+if ($Portable) {
+    Write-Output "Built portable app: $((Resolve-Path -LiteralPath "$bundle/tiny-md.exe").Path)"
+    return
+}
 
 $compiler = Get-Command ISCC.exe -ErrorAction SilentlyContinue
 if ($compiler) {

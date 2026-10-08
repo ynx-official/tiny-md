@@ -21,6 +21,35 @@ pub struct Document {
     bom: bool,
 }
 
+#[derive(Debug)]
+pub struct ExternalChange {
+    document: Document,
+    text: String,
+}
+
+#[derive(Debug)]
+pub enum SyncError {
+    Io(io::Error),
+    Conflict,
+}
+
+impl From<io::Error> for SyncError {
+    fn from(error: io::Error) -> Self {
+        Self::Io(error)
+    }
+}
+
+impl std::fmt::Display for SyncError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Io(error) => error.fmt(f),
+            Self::Conflict => f.write_str("本地和其他应用修改了同一处内容，需要选择如何同步"),
+        }
+    }
+}
+
+impl std::error::Error for SyncError {}
+
 impl Document {
     pub fn untitled(text: &str) -> Self {
         Self {
@@ -35,6 +64,10 @@ impl Document {
     pub fn open(path: &Path) -> io::Result<(Self, String)> {
         let path = fs::canonicalize(path)?;
         let bytes = fs::read(&path)?;
+        Self::from_bytes(path, bytes)
+    }
+
+    fn from_bytes(path: PathBuf, bytes: Vec<u8>) -> io::Result<(Self, String)> {
         let bom = bytes.starts_with(&[0xef, 0xbb, 0xbf]);
         let source = std::str::from_utf8(if bom { &bytes[3..] } else { &bytes })
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
@@ -94,6 +127,76 @@ impl Document {
             return Ok(());
         }
         self.write_to(&path, text)
+    }
+
+    /// Compare raw bytes so encoding-only changes also refresh the baseline.
+    pub fn read_external_change(&self) -> io::Result<Option<ExternalChange>> {
+        let Some(path) = self.path.as_ref() else {
+            return Ok(None);
+        };
+        let bytes = fs::read(path)?;
+        if self.disk_snapshot.as_ref() == Some(&bytes) {
+            return Ok(None);
+        }
+        let (document, text) = Self::from_bytes(path.clone(), bytes)?;
+        Ok(Some(ExternalChange { document, text }))
+    }
+
+    /// Guard asynchronous reads against a switched document or newer sync/save.
+    pub fn same_baseline(&self, other: &Self) -> bool {
+        self.path == other.path && self.disk_snapshot == other.disk_snapshot
+    }
+
+    /// A three-way line merge; a conflict leaves both versions untouched.
+    pub fn reconcile(
+        &self,
+        change: ExternalChange,
+        local: &str,
+    ) -> Result<(Self, String), SyncError> {
+        let merged = if local == self.saved_text || local == change.text {
+            change.text
+        } else if change.text == self.saved_text {
+            local.to_owned()
+        } else {
+            diffy::merge(&self.saved_text, local, &change.text).map_err(|_| SyncError::Conflict)?
+        };
+        Ok((change.document, merged))
+    }
+
+    /// Reconcile again at save time, even if the background poll has not run.
+    /// Only publish the new baseline after the entire save succeeds.
+    pub fn save_synchronized(&mut self, text: &str) -> Result<String, SyncError> {
+        let mut document = self.clone();
+        let mut merged = text.to_owned();
+        for _ in 0..3 {
+            if let Some(change) = document.read_external_change()? {
+                (document, merged) = document.reconcile(change, &merged)?;
+            }
+            match document.save(&merged) {
+                Ok(()) => {
+                    *self = document;
+                    return Ok(merged);
+                }
+                // Another writer changed the file between the read and save.
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Err(io::Error::other("文件正在被其他应用持续修改，请稍后保存").into())
+    }
+
+    pub fn save_as_synchronized(&mut self, path: &Path, text: &str) -> Result<String, SyncError> {
+        let target = if path.exists() {
+            fs::canonicalize(path)?
+        } else {
+            path.to_path_buf()
+        };
+        if self.path.as_ref() == Some(&target) {
+            self.save_synchronized(text)
+        } else {
+            self.save_as(&target, text)?;
+            Ok(text.to_owned())
+        }
     }
 
     pub fn save_as(&mut self, path: &Path, text: &str) -> io::Result<()> {
@@ -199,6 +302,113 @@ pub fn outline(text: &str) -> Vec<Heading> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn synchronized_save_loads_external_edits_when_local_text_is_clean() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("note.md");
+        fs::write(&path, "原文\n").unwrap();
+        let (mut doc, local) = Document::open(&path).unwrap();
+        fs::write(&path, "外部编辑 🌱\n").unwrap();
+        let saved = doc.save_synchronized(&local).unwrap();
+        assert_eq!(saved, "外部编辑 🌱\n");
+        assert!(!doc.is_dirty(&saved));
+        assert_eq!(fs::read_to_string(&path).unwrap(), saved);
+    }
+
+    #[test]
+    fn synchronized_save_merges_separate_edits_before_writing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("note.md");
+        fs::write(&path, "第一行\n中间\n第三行\n").unwrap();
+        let (mut doc, _) = Document::open(&path).unwrap();
+        fs::write(&path, "第一行\n中间\n外部修改\n").unwrap();
+        let saved = doc.save_synchronized("本地修改\n中间\n第三行\n").unwrap();
+        assert_eq!(saved, "本地修改\n中间\n外部修改\n");
+        assert_eq!(fs::read_to_string(&path).unwrap(), saved);
+        assert!(!doc.is_dirty(&saved));
+    }
+
+    #[test]
+    fn overlapping_edits_leave_the_disk_and_baseline_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("note.md");
+        fs::write(&path, "共同版本\n").unwrap();
+        let (mut doc, _) = Document::open(&path).unwrap();
+        let before = doc.clone();
+        fs::write(&path, "外部版本\n").unwrap();
+        assert!(matches!(
+            doc.save_synchronized("本地版本\n"),
+            Err(SyncError::Conflict)
+        ));
+        assert!(doc.same_baseline(&before));
+        assert!(!doc.is_dirty("共同版本\n"));
+        assert_eq!(fs::read_to_string(&path).unwrap(), "外部版本\n");
+        assert!(matches!(
+            doc.save_as_synchronized(&path, "本地版本\n"),
+            Err(SyncError::Conflict)
+        ));
+        let copy = dir.path().join("copy.md");
+        doc.save_as_synchronized(&copy, "本地版本\n").unwrap();
+        assert_eq!(fs::read_to_string(copy).unwrap(), "本地版本\n");
+        assert_eq!(fs::read_to_string(path).unwrap(), "外部版本\n");
+    }
+
+    #[test]
+    fn background_sync_keeps_local_changes_dirty_and_advances_the_disk_baseline() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("note.md");
+        fs::write(&path, "one\nmiddle\nthree\n").unwrap();
+        let (doc, _) = Document::open(&path).unwrap();
+        fs::write(&path, "one\nmiddle\nremote\n").unwrap();
+        let change = doc.read_external_change().unwrap().unwrap();
+        let (mut synced, merged) = doc.reconcile(change, "local\nmiddle\nthree\n").unwrap();
+        assert_eq!(merged, "local\nmiddle\nremote\n");
+        assert!(synced.is_dirty(&merged));
+        assert!(!synced.same_baseline(&doc));
+        assert!(synced.read_external_change().unwrap().is_none());
+        assert_eq!(fs::read_to_string(&path).unwrap(), "one\nmiddle\nremote\n");
+        synced.save_synchronized(&merged).unwrap();
+        assert_eq!(fs::read_to_string(path).unwrap(), merged);
+    }
+
+    #[test]
+    fn identical_edits_and_encoding_changes_sync_without_false_conflicts() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("note.md");
+        fs::write(&path, "old\n").unwrap();
+        let (mut doc, _) = Document::open(&path).unwrap();
+        fs::write(&path, "\u{feff}中文 🌱\r\n").unwrap();
+        assert_eq!(doc.save_synchronized("中文 🌱\n").unwrap(), "中文 🌱\n");
+        assert!(!doc.is_dirty("中文 🌱\n"));
+        fs::write(&path, "中文 🌱\n").unwrap();
+        assert_eq!(
+            doc.save_synchronized("中文 🌱\nlocal\n").unwrap(),
+            "中文 🌱\nlocal\n"
+        );
+        assert_eq!(fs::read_to_string(&path).unwrap(), "中文 🌱\nlocal\n");
+    }
+
+    #[test]
+    fn deleted_and_invalid_utf8_files_never_destroy_local_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("note.md");
+        fs::write(&path, "old").unwrap();
+        let (mut doc, _) = Document::open(&path).unwrap();
+        let before = doc.clone();
+        fs::remove_file(&path).unwrap();
+        assert!(
+            matches!(doc.save_synchronized("local"), Err(SyncError::Io(error)) if error.kind() == io::ErrorKind::NotFound)
+        );
+        assert!(doc.same_baseline(&before));
+        assert!(!path.exists());
+        fs::write(&path, [0xff, 0xfe]).unwrap();
+        assert!(
+            matches!(doc.save_synchronized("local"), Err(SyncError::Io(error)) if error.kind() == io::ErrorKind::InvalidData)
+        );
+        assert!(doc.same_baseline(&before));
+        assert_eq!(fs::read(path).unwrap(), [0xff, 0xfe]);
+    }
 
     #[test]
     fn retargeted_document_keeps_dirty_baseline_encoding_and_conflict_checks() {

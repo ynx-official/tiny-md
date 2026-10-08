@@ -53,6 +53,10 @@ sh scripts/package-macos.sh 0.1.0
 ./scripts/bundle-windows.ps1 -Version 0.1.0
 ```
 
+只生成可直接运行的便携目录时使用 `./scripts/bundle-windows.ps1 -Version 0.1.0 -Portable`，
+不需要 Inno Setup。产物为 `target/windows/Tiny MD/tiny-md.exe`，两种构建方式均在打包前
+核验 x64 PE32+ 和 Windows GUI 子系统，防止双击应用时出现控制台。
+
 输出为 `target/release-assets/tiny-md-v0.1.0-windows-x64-setup.exe`。需要 SDK 的 `fxc.exe`
 编译 GPUI 发布版着色器；工作流会自动定位该编译器。Windows 应用的实际交互和输入法
 仍需在 Windows 上验收。

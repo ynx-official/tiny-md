@@ -197,7 +197,7 @@ fn replace(model: &mut EditorModel, source: &str, range: Range<usize>, text: &st
     }
 }
 
-fn apply_difference(model: &mut EditorModel, target: &str) {
+pub(crate) fn apply_difference(model: &mut EditorModel, target: &str) {
     let source = model.text();
     if source == target {
         return;
