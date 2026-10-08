@@ -7,7 +7,7 @@ use gpui_component::{
     input::{Input, InputEvent, InputState},
 };
 use std::path::{Path, PathBuf};
-use tiny_md_document::{Document, Heading, outline};
+use tiny_md_document::{Document, Heading, TextAnalysis};
 use tiny_md_editor::{
     BlockStyle, EditorCommand, MarkdownEditor, MarkdownEditorEvent, MarkdownStyle, TableAlignment,
     TableCommand,
@@ -124,6 +124,7 @@ struct TinyMd {
     _disk_sync_task: Task<()>,
     external_conflict: bool,
     headings: Vec<Heading>,
+    analysis: TextAnalysis,
     characters: usize,
     dirty: bool,
     busy: bool,
@@ -215,6 +216,14 @@ fn editor_style(dark: bool) -> MarkdownStyle {
 }
 
 impl TinyMd {
+    fn update_analysis(&mut self, text: &str) {
+        let work = self.analysis.update(text);
+        self.characters = self.analysis.characters();
+        if work.outlined {
+            self.headings = self.analysis.headings().to_vec();
+        }
+    }
+
     fn new(initial: Option<PathBuf>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let dark = cx.global::<Session>().dark;
         let (document, text, status, error) = match initial {
@@ -264,8 +273,7 @@ impl TinyMd {
             |this, _, event: &MarkdownEditorEvent, cx| match event {
                 MarkdownEditorEvent::Change(text) => {
                     this.dirty = this.document.is_dirty(text);
-                    this.characters = text.chars().filter(|c| !c.is_whitespace()).count();
-                    this.headings = outline(text);
+                    this.update_analysis(text);
                     this.status = if this.external_conflict {
                         disk_sync::CONFLICT_NOTICE
                     } else if this.dirty {
@@ -318,6 +326,8 @@ impl TinyMd {
             .path()
             .and_then(Path::parent)
             .map(Path::to_path_buf);
+        let mut analysis = TextAnalysis::default();
+        analysis.update(&text);
         let mut this = Self {
             #[cfg(target_os = "windows")]
             menu_bar: None,
@@ -325,8 +335,9 @@ impl TinyMd {
             document,
             _disk_sync_task: Self::start_disk_sync(window, cx),
             external_conflict: false,
-            headings: outline(&text),
-            characters: text.chars().filter(|c| !c.is_whitespace()).count(),
+            headings: analysis.headings().to_vec(),
+            characters: analysis.characters(),
+            analysis,
             dirty: false,
             busy: false,
             dark,
@@ -457,8 +468,7 @@ impl TinyMd {
         }
         self.editor
             .update(cx, |editor, cx| editor.set_text(text, cx));
-        self.headings = outline(text);
-        self.characters = text.chars().filter(|c| !c.is_whitespace()).count();
+        self.update_analysis(text);
         self.dirty = false;
         self.error = false;
         self.status = "准备好了".into();

@@ -1,6 +1,6 @@
-use super::{Document, Intent, Path, Session, TinyMd, library, outline};
+use super::{Document, Intent, Path, Session, TinyMd, library};
 use gpui::{App, Context, PromptLevel, Task, Window};
-use tiny_md_document::SyncError;
+use tiny_md_document::{DiskWatch, SyncError};
 
 pub(super) const CONFLICT_NOTICE: &str = "同步冲突：本地内容已保留";
 
@@ -19,19 +19,25 @@ impl TinyMd {
     pub(super) fn start_disk_sync(window: &mut Window, cx: &mut Context<Self>) -> Task<()> {
         let executor = cx.background_executor().clone();
         cx.spawn_in(window, async move |this, cx| {
+            let mut watch = DiskWatch::default();
             loop {
-                executor.timer(std::time::Duration::from_secs(1)).await;
+                executor.timer(std::time::Duration::from_millis(150)).await;
                 let snapshot = this.update_in(cx, |this, _, cx| {
-                    (!this.busy
-                        && !this.editor.read(cx).is_composing()
-                        && this.document.path().is_some())
-                    .then(|| this.document.clone())
+                    (
+                        this.document.clone(),
+                        !this.busy
+                            && !this.editor.read(cx).is_composing()
+                            && this.document.path().is_some(),
+                    )
                 });
-                let document = match snapshot {
-                    Ok(Some(document)) => document,
-                    Ok(None) => continue,
+                let (document, available) = match snapshot {
+                    Ok(snapshot) => snapshot,
                     Err(_) => break,
                 };
+                watch.set_path(document.path());
+                if !watch.needs_read(std::time::Instant::now(), available) {
+                    continue;
+                }
                 let read_document = document.clone();
                 let change = executor
                     .spawn(async move { read_document.read_external_change() })
@@ -58,7 +64,10 @@ impl TinyMd {
                         .then(|| this.editor.read(cx).text())
                 }) {
                     Ok(Some(local)) => local,
-                    Ok(None) => continue,
+                    Ok(None) => {
+                        watch.retry();
+                        continue;
+                    }
                     Err(_) => break,
                 };
                 let merge_document = document.clone();
@@ -70,7 +79,7 @@ impl TinyMd {
                     // Reads/merges run off the UI thread. Never apply them over
                     // typing, composition, a save, or a subsequently opened file.
                     if !this.can_sync(&document, cx) || this.editor.read(cx).text() != local {
-                        return;
+                        return false;
                     }
                     match result {
                         Ok((document, text)) => {
@@ -79,9 +88,12 @@ impl TinyMd {
                         Err(SyncError::Conflict) => this.mark_sync_conflict(cx),
                         Err(error) => this.fail(format!("同步失败：{error}"), cx),
                     }
+                    true
                 });
-                if updated.is_err() {
-                    break;
+                match updated {
+                    Ok(false) => watch.retry(),
+                    Ok(true) => {}
+                    Err(_) => break,
                 }
             }
         })
@@ -104,8 +116,7 @@ impl TinyMd {
             editor.apply_external_text(text, cx);
         });
         self.dirty = self.document.is_dirty(text);
-        self.headings = outline(text);
-        self.characters = text.chars().filter(|c| !c.is_whitespace()).count();
+        self.update_analysis(text);
         self.status = status.into();
         self.error = false;
         if let Some(entry) = self

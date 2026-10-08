@@ -24,24 +24,24 @@
 
 use crate::caret::CaretBlink;
 use crate::chord::Chord;
-use crate::code_blocks;
 use crate::diagrams::{self, DiagramKey, DiagramState, DiagramView};
 use crate::editmenu::{self, EditMenu};
 use crate::ime::{self, ImeState};
+use crate::render_cache::{self, DocumentCache, RowSlots};
 use crate::syntax;
 use crate::tables::{self, Alignment};
 use gpui::prelude::*;
 use gpui::{
-    App, Bounds, ClipboardItem, Context, Div, DragMoveEvent, ElementInputHandler, Empty, Entity,
-    EntityId, EventEmitter, FocusHandle, Font, FontStyle, FontWeight, Hsla, IntoElement,
-    KeyDownEvent, MouseButton, MouseDownEvent, Pixels, ScrollHandle, SharedString,
-    StrikethroughStyle, Task, TextAlign, TextRun, UnderlineStyle, Window, WrappedLine, canvas, div,
-    img, point, px,
+    AnyElement, AnyView, App, Bounds, ClipboardItem, Context, Div, DragMoveEvent,
+    ElementInputHandler, Empty, Entity, EntityId, EventEmitter, FocusHandle, Font, FontStyle,
+    FontWeight, Hsla, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, Pixels, ScrollHandle,
+    SharedString, StrikethroughStyle, StyleRefinement, Task, TextAlign, TextRun, UnderlineStyle,
+    Window, WrappedLine, canvas, div, img, point, px,
 };
 use guise::actions;
 use guise::overlay::ContextMenu;
 
-use guise::editor::{EditorModel, Highlighter, LineState, Pos, TokenKind, token_color};
+use guise::editor::{EditorModel, Pos, TokenKind, token_color};
 use guise::markdown::block::{Block, DocState, classify};
 use guise::markdown::layout::{
     RowKind, RowPlan, byte_for_col, col_for_byte, metrics, plan, src_for_vis, vis_for_src,
@@ -49,6 +49,7 @@ use guise::markdown::layout::{
 use guise::reactive::Signal;
 use guise::theme::theme;
 use guise::{Glyph, IconName};
+use std::{cell::Cell, rc::Rc};
 
 /// The monospace family for code spans and code blocks.
 const MONO_FAMILY: &str = if cfg!(target_os = "macos") {
@@ -68,8 +69,13 @@ gpui::actions!(tiny_md_editor, [EditorTab, EditorTabPrevious]);
 struct EditorKeyBindings;
 impl gpui::Global for EditorKeyBindings {}
 
+#[path = "editor_layers.rs"]
+mod layers;
 #[path = "platform_input.rs"]
 mod platform_input;
+#[cfg(test)]
+#[path = "render_regressions.rs"]
+mod render_regressions;
 
 /// Emitted as the user edits or activates a link.
 #[derive(Debug, Clone)]
@@ -125,10 +131,49 @@ struct Row {
     pad_top: f32,
     inset: f32,
     height: f32,
-    y: f32,
+    y: Cell<f32>,
     cells: Vec<TableCell>,
     align: TextAlign,
     wrap: f32,
+}
+
+#[derive(Clone, PartialEq)]
+struct LayoutStyle {
+    font: Font,
+    base: f32,
+    wrap: f32,
+    compact: bool,
+    colors: Vec<Hsla>,
+}
+
+#[derive(Clone, PartialEq)]
+struct RowKey {
+    block: Block,
+    code: u64,
+    table: u64,
+    reveal: bool,
+    active_column: Option<usize>,
+    selected: bool,
+    hidden: bool,
+    code_edges: u8,
+    preview: u32,
+}
+
+#[derive(Default)]
+struct ModeLayout {
+    style: Option<LayoutStyle>,
+    rows: RowSlots<RowKey, Row>,
+}
+
+/// Cumulative work counters for performance regression checks, without UI text.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RenderWork {
+    pub document_renders: u64,
+    pub parsed_documents: u64,
+    pub shaped_rows: u64,
+    pub shaped_cells: u64,
+    pub built_rows: u64,
+    pub cached_rows: u64,
 }
 
 struct TableCell {
@@ -233,7 +278,7 @@ fn shape_table_cell(
         pad_top: 0.0,
         inset,
         height,
-        y: 0.0,
+        y: Cell::new(0.0),
         cells: Vec::new(),
         align: match alignment {
             Alignment::Left => TextAlign::Left,
@@ -440,6 +485,9 @@ pub struct MarkdownEditor {
     focus: FocusHandle,
     caret: CaretBlink,
     _caret_task: Task<()>,
+    document_layer: Entity<layers::DocumentLayer>,
+    caret_layer: Entity<layers::CaretLayer>,
+    document_focused: bool,
     /// The right-click Cut / Copy / Paste menu, built on each right-click.
     menu: Option<Entity<ContextMenu>>,
     scroll: ScrollHandle,
@@ -450,7 +498,13 @@ pub struct MarkdownEditor {
     /// Measured prose cell advance, for indent units and newline cells.
     cell_w: f32,
     /// Last frame's per-line layout, for mouse/caret/scroll math.
-    layout: Vec<Row>,
+    layout: Vec<Rc<Row>>,
+    document_cache: DocumentCache,
+    mode_layouts: [ModeLayout; 2],
+    table_widths: Vec<Vec<f32>>,
+    table_signatures: Vec<u64>,
+    table_wrap: f32,
+    work: RenderWork,
     /// Bring the caret into view on the next render.
     scroll_to_cursor: bool,
     /// Sticky x (content space) for visual-row vertical movement.
@@ -473,13 +527,20 @@ impl MarkdownEditor {
             cx.set_global(EditorKeyBindings);
         }
         let executor = cx.background_executor().clone();
+        let caret_layer = cx.new(|_| layers::CaretLayer::default());
+        let editor = cx.entity();
+        let document_layer = cx.new(|layer_cx| layers::DocumentLayer::new(editor, layer_cx));
         let caret_task = cx.spawn(async move |this, cx| {
             loop {
                 executor.timer(std::time::Duration::from_millis(100)).await;
                 if this
                     .update(cx, |this, cx| {
-                        if this.caret.tick(this.ime.active()) {
-                            cx.notify();
+                        if this.caret.tick(this.ime.active()) && this.caret_is_visible(cx) {
+                            let visible = this.caret.visible || this.ime.active();
+                            this.caret_layer.update(cx, |layer, cx| {
+                                layer.visible = visible;
+                                cx.notify();
+                            });
                         }
                     })
                     .is_err()
@@ -502,12 +563,21 @@ impl MarkdownEditor {
             focus: cx.focus_handle(),
             caret: CaretBlink::default(),
             _caret_task: caret_task,
+            document_layer,
+            caret_layer,
+            document_focused: false,
             menu: None,
             scroll: ScrollHandle::new(),
             text_bounds: Bounds::default(),
             wrap_w: DEFAULT_WRAP,
             cell_w: 15.0 * 0.55,
             layout: Vec::new(),
+            document_cache: DocumentCache::default(),
+            mode_layouts: Default::default(),
+            table_widths: Vec::new(),
+            table_signatures: Vec::new(),
+            table_wrap: 0.0,
+            work: RenderWork::default(),
             scroll_to_cursor: false,
             goal_x: None,
             diagrams: std::collections::HashMap::new(),
@@ -576,6 +646,10 @@ impl MarkdownEditor {
         self.model.text()
     }
 
+    pub fn render_work(&self) -> RenderWork {
+        self.work
+    }
+
     pub fn copy_plain(&mut self, cx: &mut Context<Self>) {
         self.finish_composition(cx);
         if let Some(text) = self.model.copy() {
@@ -617,6 +691,10 @@ impl MarkdownEditor {
         self.diagram_views.clear();
         self.ime.reset();
         self.model.set_text(value);
+        self.document_cache = DocumentCache::default();
+        self.mode_layouts = Default::default();
+        self.table_wrap = 0.0;
+        self.layout.clear();
         self.normalize_heading_cursor();
         self.scroll.set_offset(point(px(0.0), px(0.0)));
         self.scroll_to_cursor = true;
@@ -1378,7 +1456,7 @@ impl MarkdownEditor {
             && let RowKind::Task { .. } = row.plan.kind
         {
             let in_slot = x < row.inset && x >= 0.0;
-            let in_first_row = y >= row.y && y < row.y + row.pad_top + row.line_h;
+            let in_first_row = y >= row.y.get() && y < row.y.get() + row.pad_top + row.line_h;
             if in_slot && in_first_row && self.toggle_task(line, cx) {
                 return;
             }
@@ -1431,7 +1509,7 @@ impl MarkdownEditor {
         }
         let mut line = self.layout.len() - 1;
         for (i, row) in self.layout.iter().enumerate() {
-            if y < row.y + row.height {
+            if y < row.y.get() + row.height {
                 line = i;
                 break;
             }
@@ -1441,7 +1519,7 @@ impl MarkdownEditor {
         let Some(text) = self.model.line(line) else {
             return (line, 0);
         };
-        let src = row.source_at(x, y - row.y);
+        let src = row.source_at(x, y - row.y.get());
         (line, col_for_byte(text, src))
     }
 
@@ -1538,7 +1616,7 @@ impl MarkdownEditor {
         let text = self.model.line(cursor.line).unwrap_or("");
         let vis = vis_for_src(&row.plan.segs, byte_for_col(text, cursor.col));
         let (_, vrow) = row.caret(vis);
-        let top = row.y + row.pad_top + vrow as f32 * row.line_h;
+        let top = row.y.get() + row.pad_top + vrow as f32 * row.line_h;
         Some((top, top + row.line_h + 2.0 * PAD_Y))
     }
 
@@ -1569,8 +1647,9 @@ impl MarkdownEditor {
     }
 }
 
-impl Render for MarkdownEditor {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+impl MarkdownEditor {
+    fn render_document(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        self.work.document_renders += 1;
         let focused = self.focus.is_focused(window);
         let caret_focused = focused && window.is_window_active() && !self.read_only;
         if caret_focused && !self.caret.focused {
@@ -1629,7 +1708,6 @@ impl Render for MarkdownEditor {
             Some((s, e)) => Some((s.line, e.line)),
             None => Some((cursor.line, cursor.line)),
         };
-        let show_caret = caret_focused && (self.caret.visible || self.ime.active());
         let marked = self.ime.marked().map(|range| {
             (
                 ime::pos_utf16(&self.model, range.start),
@@ -1640,15 +1718,60 @@ impl Render for MarkdownEditor {
 
         // build rows: classify, plan, shape
         let wrap_total = self.wrap_w.max(120.0);
-        let (tables, table_membership) = if self.source_mode {
-            (Vec::new(), vec![None; self.model.line_count()])
+        let previous = self.document_cache.current();
+        let (parsed, changed) = self.document_cache.update(self.model.lines());
+        if changed {
+            self.work.parsed_documents += 1;
+            for mode in &mut self.mode_layouts {
+                mode.rows.rebase(
+                    previous.as_ref().map_or(&[], |doc| doc.lines.as_slice()),
+                    &parsed.lines,
+                );
+            }
+            self.code_highlights.update(&parsed.code);
+        }
+        if changed || self.table_wrap != wrap_total {
+            self.table_wrap = wrap_total;
+            self.table_widths = parsed
+                .tables
+                .iter()
+                .map(|table| table.widths(&parsed.lines, wrap_total))
+                .collect();
+            self.table_signatures = parsed
+                .tables
+                .iter()
+                .zip(&self.table_widths)
+                .map(|(table, widths)| {
+                    let alignments: Vec<_> = table
+                        .alignments
+                        .iter()
+                        .map(|alignment| match alignment {
+                            Alignment::Left => 0u8,
+                            Alignment::Center => 1,
+                            Alignment::Right => 2,
+                        })
+                        .collect();
+                    render_cache::fingerprint(&(
+                        widths
+                            .iter()
+                            .map(|width| width.to_bits())
+                            .collect::<Vec<_>>(),
+                        alignments,
+                    ))
+                })
+                .collect();
+        }
+        let tables = if self.source_mode {
+            &parsed.tables[..0]
         } else {
-            tables::collect(self.model.lines())
+            parsed.tables.as_slice()
         };
-        let table_widths = tables
+        let table_widths = &self.table_widths;
+        let table_membership: Vec<_> = parsed
+            .table_membership
             .iter()
-            .map(|table| table.widths(self.model.lines(), wrap_total))
-            .collect::<Vec<_>>();
+            .map(|index| if self.source_mode { None } else { *index })
+            .collect();
         let cell_style = CellStyle {
             base,
             font: prose.clone(),
@@ -1658,13 +1781,18 @@ impl Render for MarkdownEditor {
             code_bg,
             highlight_bg,
         };
-        let (blocks, membership) = if self.source_mode {
-            (Vec::new(), vec![None; self.model.line_count()])
+        let blocks = if self.source_mode {
+            &parsed.code[..0]
         } else {
-            code_blocks::collect(self.model.lines())
+            parsed.code.as_slice()
         };
-        self.code_highlights.update(&blocks);
-        let keys = blocks
+        let membership: Vec<_> = parsed
+            .code_membership
+            .iter()
+            .map(|index| if self.source_mode { None } else { *index })
+            .collect();
+        let all_keys = parsed
+            .code
             .iter()
             .map(|block| {
                 block.is_mermaid().then(|| DiagramKey {
@@ -1674,18 +1802,22 @@ impl Render for MarkdownEditor {
             })
             .collect::<Vec<_>>();
         self.diagram_views.retain(|line, _| {
-            blocks
+            parsed
+                .code
                 .iter()
                 .any(|block| block.start == *line && block.is_mermaid())
         });
-        for block in blocks.iter().filter(|block| block.is_mermaid()) {
+        for block in parsed.code.iter().filter(|block| block.is_mermaid()) {
             self.diagram_views.entry(block.start).or_default();
         }
         // Dropping obsolete pending tasks cancels their debounce/work; stale results
         // cannot replace a newer source or the other theme's preview.
         self.diagrams
-            .retain(|key, _| keys.iter().flatten().any(|current| current == key));
-        for key in keys.iter().flatten() {
+            .retain(|key, _| all_keys.iter().flatten().any(|current| current == key));
+        for key in all_keys.iter().flatten() {
+            if self.source_mode {
+                continue;
+            }
             if self.diagrams.contains_key(key) {
                 continue;
             }
@@ -1722,6 +1854,11 @@ impl Render for MarkdownEditor {
             self.diagrams
                 .insert(cache_key, DiagramState::Loading { _task: task });
         }
+        let keys = if self.source_mode {
+            &all_keys[..0]
+        } else {
+            all_keys.as_slice()
+        };
         let editing_range = selection.map(|(s, e)| (s.line, e.line)).or(reveal_range);
         let expanded = blocks
             .iter()
@@ -1748,29 +1885,90 @@ impl Render for MarkdownEditor {
                 },
             )
             .collect::<Vec<_>>();
-        let mut rows: Vec<Row> = Vec::with_capacity(self.model.line_count());
-        let mut doc_state = DocState::default();
-        let mut hl_state = LineState::default();
+        let mode = usize::from(self.source_mode);
+        let layout_style = LayoutStyle {
+            font: prose.clone(),
+            base,
+            wrap: wrap_total,
+            compact: style.compact_headings,
+            colors: [
+                vec![
+                    text_color,
+                    dimmed,
+                    marker_color,
+                    accent,
+                    code_bg,
+                    highlight_bg,
+                    quote_text,
+                ],
+                token_colors.to_vec(),
+            ]
+            .concat(),
+        };
+        if self.mode_layouts[mode].style.as_ref() != Some(&layout_style) {
+            self.mode_layouts[mode].rows.clear();
+            self.mode_layouts[mode].style = Some(layout_style);
+        }
+        let mut rows: Vec<Rc<Row>> = Vec::with_capacity(self.model.line_count());
         let mut y = 0.0;
         for (i, line) in self.model.lines().iter().enumerate() {
             let lang = if self.source_mode {
-                Some("markdown".to_owned())
+                Some("markdown")
             } else {
-                doc_state.fence_lang().map(str::to_string)
+                parsed.languages[i].as_deref()
             };
             let block = if self.source_mode {
                 Block::CodeLine
             } else {
-                classify(line, &mut doc_state)
+                parsed.blocks[i].clone()
             };
-            if matches!(block, Block::Fence { open: true, .. }) {
-                hl_state = LineState::default();
-            }
             let reveal = reveal_range.is_some_and(|(s, e)| i >= s && i <= e);
+            let code_index = membership[i];
+            let code_block = code_index.map(|index| &blocks[index]);
+            let table_index = table_membership[i];
+            let active_column = table_index.filter(|_| reveal).map(|index| {
+                let ranges = &tables[index].rows[i - tables[index].start];
+                let cursor_byte = byte_for_col(line, cursor.col);
+                ranges
+                    .iter()
+                    .position(|range| cursor_byte <= range.end)
+                    .unwrap_or(ranges.len().saturating_sub(1))
+            });
+            let hidden = code_index.is_some_and(|index| {
+                !expanded[index]
+                    && (blocks[index].is_mermaid() || matches!(block, Block::Fence { .. }))
+            });
+            let key = RowKey {
+                block: block.clone(),
+                code: if self.source_mode {
+                    parsed.source_signatures[i]
+                } else {
+                    code_index.map_or(0, |index| parsed.code_signatures[index])
+                },
+                table: table_index.map_or(0, |index| self.table_signatures[index]),
+                reveal: reveal && !self.source_mode,
+                active_column,
+                selected: table_index.is_some() && reveal && selection.is_some(),
+                hidden,
+                code_edges: code_block.map_or(0, |block| {
+                    u8::from(i == block.start) | (u8::from(i == block.end) << 1)
+                }) | table_index.map_or(0, |index| {
+                    (u8::from(i == tables[index].start) << 2)
+                        | (u8::from(i == tables[index].start + 1) << 3)
+                }),
+                preview: code_index.map_or(0, |index| preview_heights[index].to_bits()),
+            };
+            if let Some(row) = self.mode_layouts[mode].rows.get(i, &key) {
+                row.y.set(y);
+                y += row.height;
+                rows.push(row);
+                self.work.cached_rows += 1;
+                continue;
+            }
             let plan = plan(
                 line,
                 &block,
-                lang.as_deref(),
+                lang,
                 reveal && !matches!(block, Block::Heading { .. }),
             );
 
@@ -1788,12 +1986,6 @@ impl Render for MarkdownEditor {
             let mut pad_top = (base * pt).round();
             let mut pad_bottom = (base * pb).round();
 
-            let code_index = membership[i];
-            let code_block = code_index.map(|index| &blocks[index]);
-            let hidden = code_index.is_some_and(|index| {
-                !expanded[index]
-                    && (blocks[index].is_mermaid() || matches!(plan.kind, RowKind::Fence { .. }))
-            });
             if let Some(block) = code_block {
                 if i == block.start {
                     pad_top += 40.0;
@@ -1833,14 +2025,13 @@ impl Render for MarkdownEditor {
             };
             let wrap = (wrap_total - inset - right_pad).max(60.0);
 
-            let runs = if let RowKind::Code { lang } = &plan.kind {
-                let fallback;
-                let tokens = if let Some(block) = code_block {
+            let runs = if let RowKind::Code { .. } = &plan.kind {
+                let tokens = if self.source_mode {
+                    parsed.source_tokens[i].as_slice()
+                } else if let Some(block) = code_block {
                     self.code_highlights.line(block.start, i - block.start - 1)
                 } else {
-                    fallback =
-                        syntax::fence_language(lang.as_deref()).line(&plan.visible, &mut hl_state);
-                    &fallback
+                    &[]
                 };
                 cover(plan.visible.len(), tokens)
                     .into_iter()
@@ -1913,24 +2104,32 @@ impl Render for MarkdownEditor {
                     .collect::<Vec<_>>()
             };
 
-            let shaped = window
-                .text_system()
-                .shape_text(
-                    SharedString::from(plan.visible.clone()),
-                    px(size),
-                    &runs,
-                    Some(px(wrap)),
-                    None,
-                )
-                .ok()
-                .and_then(|mut lines| {
-                    if lines.is_empty() {
-                        None
-                    } else {
-                        Some(std::rc::Rc::new(lines.swap_remove(0)))
-                    }
-                })
-                .filter(|_| !hidden);
+            // Grid rows use cell layout; hidden source never needs glyphs.
+            let grid_row = table_index.is_some_and(|index| i != tables[index].start + 1);
+            let hidden_delimiter =
+                table_index.is_some_and(|index| i == tables[index].start + 1 && !reveal);
+            let shaped = if hidden || grid_row || hidden_delimiter || plan.visible.is_empty() {
+                None
+            } else {
+                self.work.shaped_rows += 1;
+                window
+                    .text_system()
+                    .shape_text(
+                        SharedString::from(plan.visible.clone()),
+                        px(size),
+                        &runs,
+                        Some(px(wrap)),
+                        None,
+                    )
+                    .ok()
+                    .and_then(|mut lines| {
+                        if lines.is_empty() {
+                            None
+                        } else {
+                            Some(std::rc::Rc::new(lines.swap_remove(0)))
+                        }
+                    })
+            };
             let visual_rows = shaped
                 .as_ref()
                 .map_or(1, |s| s.wrap_boundaries().len() + 1)
@@ -1965,7 +2164,7 @@ impl Render for MarkdownEditor {
                 pad_top,
                 inset,
                 height,
-                y,
+                y: Cell::new(y),
                 cells: Vec::new(),
                 align: TextAlign::Left,
                 wrap,
@@ -2007,6 +2206,7 @@ impl Render for MarkdownEditor {
                             &cell_style,
                             window,
                         );
+                        self.work.shaped_cells += 1;
                         row.plan
                             .links
                             .extend(cell.plan.links.iter().map(|(range, target)| {
@@ -2034,7 +2234,7 @@ impl Render for MarkdownEditor {
                 }
             }
             y += row.height;
-            rows.push(row);
+            rows.push(self.mode_layouts[mode].rows.insert(i, key, row));
         }
         self.layout = rows;
         if self.scroll_to_cursor {
@@ -2043,11 +2243,31 @@ impl Render for MarkdownEditor {
         }
 
         // build elements
-        let mut row_divs: Vec<Div> = Vec::with_capacity(self.layout.len());
-        for (i, row) in self.layout.iter().enumerate() {
+        let view_height = f32::from(self.scroll.bounds().size.height).max(1.0);
+        let padding = if self.typewriter {
+            view_height * 0.45
+        } else {
+            PAD_Y
+        };
+        let view_height = if view_height <= 1.0 {
+            f32::from(window.viewport_size().height)
+        } else {
+            view_height
+        };
+        let visible = render_cache::visible_rows(
+            self.layout.len(),
+            |i| self.layout[i].height,
+            (-f32::from(self.scroll.offset().y) - padding).max(0.0),
+            view_height,
+            view_height,
+        );
+        let mut row_divs: Vec<Div> = Vec::with_capacity(visible.range.len());
+        for i in visible.range.clone() {
+            let row = &self.layout[i];
             if row.height == 0.0 {
                 continue;
             }
+            self.work.built_rows += 1;
             let size_of_row = row
                 .text
                 .as_ref()
@@ -2544,24 +2764,6 @@ impl Render for MarkdownEditor {
                 }
             }
 
-            // Caret.
-            if show_caret
-                && i == cursor.line
-                && let Some(text) = self.model.line(i)
-            {
-                let vis = vis_for_src(&row.plan.segs, byte_for_col(text, cursor.col));
-                let (x, vrow) = row.caret(vis);
-                el = el.child(
-                    div()
-                        .absolute()
-                        .left(px((row.inset + x).max(0.0)))
-                        .top(px(row.pad_top + vrow as f32 * row.line_h))
-                        .w(px(1.0))
-                        .h(px(row.line_h))
-                        .bg(caret_color),
-                );
-            }
-
             row_divs.push(el);
         }
 
@@ -2572,13 +2774,17 @@ impl Render for MarkdownEditor {
         let input_focus = self.focus.clone();
         let editable = !self.read_only;
         let probe = canvas(
-            move |bounds, _window, cx| {
+            move |bounds, window, cx| {
                 entity.update(cx, |this, cx| {
                     this.text_bounds = bounds;
                     let w = f32::from(bounds.size.width);
                     if (w - this.wrap_w).abs() > 0.5 {
                         this.wrap_w = w;
-                        cx.notify();
+                        // A cached view is laid out during prepaint. GPUI does
+                        // not deliver observer notifications while drawing;
+                        // invalidate after the frame so the document cache sees
+                        // the newly measured width on the following frame.
+                        cx.defer_in(window, |_, _, cx| cx.notify());
                     }
                 });
             },
@@ -2601,7 +2807,13 @@ impl Render for MarkdownEditor {
             .flex_col()
             .w_full()
             .child(probe)
-            .children(row_divs);
+            .when(visible.before > 0.0, |column| {
+                column.child(div().h(px(visible.before)).flex_shrink_0())
+            })
+            .children(row_divs)
+            .when(visible.after > 0.0, |column| {
+                column.child(div().h(px(visible.after)).flex_shrink_0())
+            });
         if show_placeholder {
             lines_col = lines_col.child(
                 div()
@@ -2613,11 +2825,6 @@ impl Render for MarkdownEditor {
             );
         }
 
-        let padding = if self.typewriter {
-            f32::from(self.scroll.bounds().size.height) * 0.45
-        } else {
-            PAD_Y
-        };
         let content = div()
             .w_full()
             .py(px(padding))
@@ -2667,6 +2874,31 @@ impl Render for MarkdownEditor {
             body = body.min_h(px(rows as f32 * base_line_h + 2.0 * PAD_Y));
         }
 
+        let caret_bounds = self.layout.get(cursor.line).and_then(|row| {
+            let text = self.model.line(cursor.line)?;
+            let vis = vis_for_src(&row.plan.segs, byte_for_col(text, cursor.col));
+            let (x, vrow) = row.caret(vis);
+            let border = if style.bare { 0.0 } else { 1.0 };
+            Some(Bounds::new(
+                point(
+                    px(PAD_X + row.inset + x + border),
+                    px(padding
+                        + row.y.get()
+                        + row.pad_top
+                        + vrow as f32 * row.line_h
+                        + f32::from(self.scroll.offset().y)
+                        + border),
+                ),
+                gpui::size(px(1.0), px(row.line_h)),
+            ))
+        });
+        self.caret_layer.update(cx, |layer, cx| {
+            if layer.bounds != caret_bounds || layer.color != caret_color {
+                layer.bounds = caret_bounds;
+                layer.color = caret_color;
+                cx.notify();
+            }
+        });
         let mut frame = div().flex().flex_col().w_full().h_full();
         if !style.bare {
             frame = frame
@@ -2681,6 +2913,42 @@ impl Render for MarkdownEditor {
             .line_height(px(base_line_h))
             .text_color(text_color)
             .child(body)
+            .into_any_element()
+    }
+
+    fn caret_is_visible(&self, cx: &App) -> bool {
+        self.caret_layer.read(cx).bounds.is_some_and(|bounds| {
+            bounds.origin.y + bounds.size.height > px(0.0)
+                && bounds.origin.y < self.scroll.bounds().size.height
+        })
+    }
+}
+
+impl Render for MarkdownEditor {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let focused = self.focus.is_focused(window);
+        if self.document_focused != focused {
+            self.document_focused = focused;
+            self.caret.reset();
+            self.document_layer.update(cx, |_, cx| cx.notify());
+        }
+        self.caret.focused = focused && window.is_window_active() && !self.read_only;
+        let visible = self.caret.focused && (self.caret.visible || self.ime.active());
+        self.caret_layer.update(cx, |layer, cx| {
+            if layer.visible != visible {
+                layer.visible = visible;
+                cx.notify();
+            }
+        });
+        div()
+            .relative()
+            .size_full()
+            .overflow_hidden()
+            .child(
+                AnyView::from(self.document_layer.clone())
+                    .cached(StyleRefinement::default().size_full()),
+            )
+            .child(self.caret_layer.clone())
     }
 }
 

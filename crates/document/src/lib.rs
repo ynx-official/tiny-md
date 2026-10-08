@@ -1,9 +1,14 @@
 //! File state independent of the editor. Live text remains owned by the view.
+mod disk_watch;
+mod text_analysis;
+pub use disk_watch::DiskWatch;
 use std::{
     fs,
     io::{self, Write},
     path::{Path, PathBuf},
+    sync::Arc,
 };
+pub use text_analysis::{AnalysisWork, TextAnalysis};
 
 #[derive(Clone, Copy, Debug, Default)]
 enum LineEnding {
@@ -15,8 +20,8 @@ enum LineEnding {
 #[derive(Clone, Debug)]
 pub struct Document {
     path: Option<PathBuf>,
-    saved_text: String,
-    disk_snapshot: Option<Vec<u8>>,
+    saved_text: Arc<str>,
+    disk_snapshot: Option<Arc<[u8]>>,
     line_ending: LineEnding,
     bom: bool,
 }
@@ -79,8 +84,8 @@ impl Document {
         let text = source.replace("\r\n", "\n").replace('\r', "\n");
         let document = Self {
             path: Some(path),
-            saved_text: text.clone(),
-            disk_snapshot: Some(bytes),
+            saved_text: text.as_str().into(),
+            disk_snapshot: Some(bytes.into()),
             line_ending,
             bom,
         };
@@ -98,7 +103,7 @@ impl Document {
         }
     }
     pub fn is_dirty(&self, text: &str) -> bool {
-        self.saved_text != text
+        self.saved_text.as_ref() != text
     }
 
     pub fn title(&self) -> String {
@@ -117,7 +122,7 @@ impl Document {
         // Best-effort external-change detection. Never silently overwrite a
         // changed/deleted file. Save As is the explicit way to keep a new copy.
         let current = fs::read(&path)?;
-        if Some(&current) != self.disk_snapshot.as_ref() {
+        if Some(current.as_slice()) != self.disk_snapshot.as_deref() {
             return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
                 "文件已被其他程序修改，请另存为，或重新打开文件后合并修改。",
@@ -135,7 +140,7 @@ impl Document {
             return Ok(None);
         };
         let bytes = fs::read(path)?;
-        if self.disk_snapshot.as_ref() == Some(&bytes) {
+        if self.disk_snapshot.as_deref() == Some(bytes.as_slice()) {
             return Ok(None);
         }
         let (document, text) = Self::from_bytes(path.clone(), bytes)?;
@@ -153,9 +158,9 @@ impl Document {
         change: ExternalChange,
         local: &str,
     ) -> Result<(Self, String), SyncError> {
-        let merged = if local == self.saved_text || local == change.text {
+        let merged = if local == self.saved_text.as_ref() || local == change.text {
             change.text
-        } else if change.text == self.saved_text {
+        } else if change.text == self.saved_text.as_ref() {
             local.to_owned()
         } else {
             diffy::merge(&self.saved_text, local, &change.text).map_err(|_| SyncError::Conflict)?
@@ -235,7 +240,7 @@ impl Document {
         temp.persist(path).map_err(|e| e.error)?;
         // Record success only after the atomic replacement succeeded.
         self.path = Some(path.to_path_buf());
-        self.disk_snapshot = Some(bytes);
+        self.disk_snapshot = Some(bytes.into());
         self.saved_text = text.into();
         Ok(())
     }
@@ -302,6 +307,21 @@ pub fn outline(text: &str) -> Vec<Heading> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn background_snapshots_share_saved_text_and_disk_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("snapshot.md");
+        fs::write(&path, "中文文档\n".repeat(1000)).unwrap();
+        let (document, _) = Document::open(&path).unwrap();
+        let snapshot = document.clone();
+        assert_eq!(document.saved_text.as_ptr(), snapshot.saved_text.as_ptr());
+        assert_eq!(
+            document.disk_snapshot.as_ref().unwrap().as_ptr(),
+            snapshot.disk_snapshot.as_ref().unwrap().as_ptr()
+        );
+        assert!(document.same_baseline(&snapshot));
+    }
 
     #[test]
     fn synchronized_save_loads_external_edits_when_local_text_is_clean() {

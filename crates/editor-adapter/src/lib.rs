@@ -12,11 +12,12 @@ mod editmenu;
 mod external_text;
 mod ime;
 mod markdown_editor;
+mod render_cache;
 mod syntax;
 mod tables;
 mod unicode;
 
 pub use commands::{BlockStyle, EditorCommand};
 pub use guise::editor::Pos;
-pub use markdown_editor::{MarkdownEditor, MarkdownEditorEvent, MarkdownStyle};
+pub use markdown_editor::{MarkdownEditor, MarkdownEditorEvent, MarkdownStyle, RenderWork};
 pub use tables::{Alignment as TableAlignment, TableCommand};

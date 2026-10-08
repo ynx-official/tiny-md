@@ -8,3 +8,4 @@ publish.workspace = true
 [dependencies]
 diffy = { version = "=0.4.2", default-features = false }
 tempfile = "3"
+notify = "=7.0.0"

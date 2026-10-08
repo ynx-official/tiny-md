@@ -93,7 +93,7 @@ impl EntityInputHandler for MarkdownEditor {
             point(
                 self.text_bounds.origin.x + px(row.inset + x),
                 self.text_bounds.origin.y
-                    + px(row.y + row.pad_top + visual_row as f32 * row.line_h),
+                    + px(row.y.get() + row.pad_top + visual_row as f32 * row.line_h),
             ),
             size(px(1.0), px(row.line_h)),
         ))

@@ -4,6 +4,20 @@
 - 最后更新：2026-10-08
 - 关联文档：[文档索引](README.md)、[Windows 说明](05-operations/windows.md)
 
+## 长文档性能优化自动回归（2026-10-08）
+
+- 五项实现与具体工作量见 [渲染性能优化](04-quality/render-performance-optimization.md)，
+  原生优化前耗时见 [分析记录](04-quality/render-performance-analysis.md)。
+- `./scripts/check.ps1`：格式、85 项测试（应用 9、文档 16、编辑器 60）及 Clippy 通过；
+  1 个原有示例 doctest 忽略。包含 8 个 GPUI 渲染 / 事件回归与真实文件监听集成验证。
+- 只读使用用户指定的 593 行长文档：滚动构建 63 行节点、零文本排版；普通段落输入
+  只重排 1 行、零表格单元格排版。此工作量来自 TestPlatform，不代表 Windows GPU 耗时。
+- Computer Use 在获取隔离窗口时被用户物理 Escape 中止，此后未继续原生 UI 输入。
+  优化后的原生 CPU 路径 P50 / P95、实际字体、长图滚动和系统中文候选尚未复验。
+- release 便携构建及 x64 Windows GUI PE 验证通过，本机安装已更新；安装版 / 便携版哈希相同，
+  为 `46C45AAF84D592E7F185F111C976783DEDC3C7D8C59937CEB0E260D3E9D79B5D`。
+  旧版备份保留，原文哈希未变。构建成功不等同于原生界面复测通过。
+
 ## Windows 自动回归（2026-10-08）
 
 - 环境：Windows 11 x64、Rust 1.96.0、Visual Studio Build Tools 2022、Windows SDK 10.0.26100.0。
@@ -188,4 +202,5 @@
 ## 后续性能验收
 
 在 10 KB、100 KB 和 1 MB 文档上测量实际输入与滚动帧时间。
-当前 Guise 视图会重建行布局、历史记录使用文本快照，尚未完成长文档性能验收。
+当前视图已缓存行布局并裁剪视口节点；初次打开及换宽仍测量全文，历史记录仍使用文本快照。
+本次自动化工作量回归不能替代 Windows / macOS 原生耗时及 1 MB 文档验收。
