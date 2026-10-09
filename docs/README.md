@@ -9,7 +9,7 @@
 | [UI 风格](02-design/ui-style.md) | 已确认的 notion 风格、原生应用适配、侧栏虚线调宽与独立滚动条 |
 | [应用图标](02-design/application-icons.md) | Windows 留白与 DPI 尺寸、macOS 独立素材、导出及资源核对 |
 | [外部文件同步](02-design/external-file-sync.md) | 自动同步、三方合并、冲突处理与撤销保护 |
-| [文档窗口](02-design/document-windows.md) | 每篇笔记独立窗口、批量打开与原文档保护 |
+| [文档窗口](02-design/document-windows.md) | 空白未命名窗口复用、批量打开与原文档保护 |
 | [在线更新设计](03-architecture/online-updates.md) | 已确认的三级更新源、下载校验、安装重启与发布边界 |
 | [在线更新验证](04-quality/online-updates.md) | 更新与发布工具回归、真实下载检查、平台验收边界 |
 | [Windows 适配](05-operations/windows.md) | Windows 开发环境、运行、快捷键及验收边界 |

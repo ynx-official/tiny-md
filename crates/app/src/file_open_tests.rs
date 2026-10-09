@@ -275,3 +275,161 @@ fn an_empty_file_selection_leaves_the_current_document_unchanged(cx: &mut TestAp
         assert!(!view.read(cx).busy);
     });
 }
+
+#[gpui::test]
+fn opening_a_note_reuses_a_pristine_untitled_window(cx: &mut TestAppContext) {
+    init(cx);
+    let directory = tempfile::tempdir().unwrap();
+    let path = note(directory.path(), "note.md", "Opened note");
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        let mut view = TinyMd::new(None, window, cx);
+        view.install(Document::untitled(""), "", window, cx);
+        view
+    });
+    cx.update(|window, cx| {
+        view.update(cx, |this, cx| {
+            this.request(Intent::OpenPath(path.clone()), window, cx);
+        });
+    });
+    assert!(!cx.has_pending_prompt());
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        assert!(cx.windows() == vec![window.window_handle()]);
+        assert_eq!(view.read(cx).document.path(), Some(path.as_path()));
+        assert_eq!(view.read(cx).editor.read(cx).text(), "Opened note");
+        assert!(!view.read(cx).dirty);
+        assert!(!view.read(cx).busy);
+        assert!(
+            view.read(cx)
+                .editor
+                .read(cx)
+                .focus_handle()
+                .is_focused(window)
+        );
+        assert_eq!(cx.global::<Session>().recent.first(), Some(&path));
+    });
+}
+
+#[gpui::test]
+fn batch_open_reuses_the_blank_window_only_for_the_first_success(cx: &mut TestAppContext) {
+    init(cx);
+    let directory = tempfile::tempdir().unwrap();
+    let first = note(directory.path(), "empty.md", "");
+    let second = note(directory.path(), "second.md", "Second note");
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        let mut view = TinyMd::new(None, window, cx);
+        view.install(Document::untitled(""), "", window, cx);
+        view
+    });
+    cx.update(|window, cx| {
+        view.update(cx, |this, cx| {
+            this.open_paths(
+                vec![
+                    directory.path().join("missing.md"),
+                    first.clone(),
+                    second.clone(),
+                ],
+                window,
+                cx,
+            );
+        });
+    });
+    cx.run_until_parked();
+    cx.read(|cx| {
+        assert_opened(cx, &second, "Second note");
+        assert_eq!(view.read(cx).document.path(), Some(first.as_path()));
+        assert_eq!(view.read(cx).editor.read(cx).text(), "");
+        assert!(view.read(cx).error);
+        assert!(view.read(cx).status.contains("missing.md"));
+    });
+}
+
+#[gpui::test]
+fn a_saved_empty_file_named_untitled_still_gets_its_own_window(cx: &mut TestAppContext) {
+    init(cx);
+    let directory = tempfile::tempdir().unwrap();
+    let first = note(directory.path(), "未命名.md", "");
+    let second = note(directory.path(), "second.md", "Second note");
+    let (view, cx) = cx.add_window_view(|window, cx| TinyMd::new(Some(first.clone()), window, cx));
+    cx.update(|window, cx| {
+        view.update(cx, |this, cx| {
+            this.request(Intent::OpenPath(second.clone()), window, cx);
+        });
+    });
+    cx.run_until_parked();
+    cx.read(|cx| {
+        assert_opened(cx, &second, "Second note");
+        assert_eq!(view.read(cx).document.path(), Some(first.as_path()));
+        assert_eq!(view.read(cx).editor.read(cx).text(), "");
+    });
+}
+
+#[gpui::test]
+fn untitled_content_is_preserved_even_when_its_dirty_flag_is_false(cx: &mut TestAppContext) {
+    init(cx);
+    let directory = tempfile::tempdir().unwrap();
+    let path = note(directory.path(), "note.md", "Opened note");
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        let mut view = TinyMd::new(None, window, cx);
+        view.install(
+            Document::untitled("Current note"),
+            "Current note",
+            window,
+            cx,
+        );
+        view
+    });
+    assert!(!cx.read(|cx| view.read(cx).dirty));
+    cx.update(|window, cx| {
+        view.update(cx, |this, cx| {
+            this.request(Intent::OpenPath(path.clone()), window, cx)
+        });
+    });
+    cx.run_until_parked();
+    cx.read(|cx| {
+        assert_opened(cx, &path, "Opened note");
+        assert_eq!(view.read(cx).document.path(), None);
+        assert_eq!(view.read(cx).editor.read(cx).text(), "Current note");
+    });
+}
+
+#[gpui::test]
+fn a_failed_open_leaves_the_pristine_window_available_for_retry(cx: &mut TestAppContext) {
+    init(cx);
+    let directory = tempfile::tempdir().unwrap();
+    let path = note(directory.path(), "note.md", "Opened note");
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        let mut view = TinyMd::new(None, window, cx);
+        view.install(Document::untitled(""), "", window, cx);
+        view
+    });
+    cx.update(|window, cx| {
+        view.update(cx, |this, cx| {
+            this.request(
+                Intent::OpenPath(directory.path().join("missing.md")),
+                window,
+                cx,
+            );
+        });
+    });
+    cx.run_until_parked();
+    cx.read(|cx| {
+        assert_eq!(cx.windows().len(), 1);
+        assert_eq!(view.read(cx).document.path(), None);
+        assert_eq!(view.read(cx).editor.read(cx).text(), "");
+        assert!(view.read(cx).error);
+        assert!(!view.read(cx).busy);
+    });
+    cx.update(|window, cx| {
+        view.update(cx, |this, cx| {
+            this.request(Intent::OpenPath(path.clone()), window, cx)
+        });
+    });
+    cx.run_until_parked();
+    cx.read(|cx| {
+        assert_eq!(cx.windows().len(), 1);
+        assert_eq!(view.read(cx).document.path(), Some(path.as_path()));
+        assert_eq!(view.read(cx).editor.read(cx).text(), "Opened note");
+        assert!(!view.read(cx).error);
+    });
+}

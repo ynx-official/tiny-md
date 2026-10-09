@@ -501,8 +501,8 @@ impl TinyMd {
             return;
         }
         self.finish_input(cx);
-        // Opening another note never replaces this editor, so its unsaved
-        // changes require no decision. Reloading still uses the save guard.
+        // Opening keeps existing notes and drafts, reusing only a pristine
+        // untitled editor. Reloading still uses the save guard.
         if matches!(intent, Intent::Open | Intent::OpenPath(_)) || !self.dirty {
             self.execute(intent, window, cx);
             return;
@@ -658,13 +658,22 @@ impl TinyMd {
         });
         cx.spawn_in(window, async move |this, cx| {
             let loaded = task.await;
-            let _ = this.update_in(cx, |this, _, cx| {
+            let _ = this.update_in(cx, |this, window, cx| {
                 this.set_busy(false, cx);
                 let mut errors = vec![];
                 for (path, result) in loaded {
                     match result {
                         Ok((document, text)) => {
-                            open_document_window(document, text, this.library_root.clone(), cx);
+                            // Check the live editor, not the deferred dirty flag.
+                            // After one success the path is set, even for an empty file.
+                            if this.document.path().is_none()
+                                && this.editor.read(cx).text().is_empty()
+                                && !this.document.is_dirty("")
+                            {
+                                this.install(document, &text, window, cx);
+                            } else {
+                                open_document_window(document, text, this.library_root.clone(), cx);
+                            }
                         }
                         Err(error) => errors.push(format!("{}：{error}", path.display())),
                     }
@@ -1368,7 +1377,7 @@ impl Render for TinyMd {
                 if accepts_markdown_drop(paths.paths()) {
                     cx.global_mut::<Session>().current = Some(window.window_handle().window_id());
                     this.finish_input(cx);
-                    // Reuse Open's new-window flow, preserving the current note.
+                    // Reuse Open's window selection, preserving existing notes.
                     this.open_paths(paths.paths().to_vec(), window, cx);
                 }
             }))
