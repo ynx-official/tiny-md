@@ -217,6 +217,265 @@ fn draw(cx: &mut gpui::VisualTestContext) {
 }
 
 #[gpui::test]
+fn markdown_interaction_checkbox_keeps_the_scrolled_view(cx: &mut TestAppContext) {
+    cx.update(|cx| guise::Theme::light().init(cx));
+    let text = (0..80)
+        .map(|i| {
+            if i == 55 {
+                "- [ ] 中文任务 🌱".into()
+            } else {
+                format!("paragraph {i}")
+            }
+        })
+        .collect::<Vec<String>>()
+        .join("\n");
+    let (editor, cx) = cx.add_window_view(|window, cx| {
+        let editor = MarkdownEditor::new(cx).value(&text).style(MarkdownStyle {
+            bare: true,
+            ..Default::default()
+        });
+        window.focus(&editor.focus);
+        editor
+    });
+    cx.simulate_resize(size(px(320.0), px(200.0)));
+    draw(cx);
+    draw(cx);
+    for typewriter in [false, true] {
+        editor.update(cx, |editor, cx| {
+            editor.typewriter = typewriter;
+            editor.scroll_to_cursor = false;
+            editor
+                .scroll
+                .set_offset(point(px(0.0), px(-editor.layout[55].y.get() + 60.0)));
+            cx.notify();
+        });
+        draw(cx);
+        draw(cx);
+        let (position, offset, cursor) = cx.read(|app| {
+            let editor = editor.read(app);
+            let row = &editor.layout[55];
+            (
+                editor.text_bounds.origin
+                    + point(
+                        px(row.inset / 2.0),
+                        px(row.y.get() + row.pad_top + row.line_h / 2.0),
+                    ),
+                editor.scroll.offset(),
+                editor.model.cursor(),
+            )
+        });
+        assert!(position.y > px(0.0) && position.y < px(200.0));
+        assert!(offset.y < px(-500.0));
+        for checked in [true, false] {
+            cx.simulate_click(position, gpui::Modifiers::none());
+            draw(cx);
+            cx.read(|app| {
+                let editor = editor.read(app);
+                assert_eq!(
+                    editor.scroll.offset(),
+                    offset,
+                    "checkbox must not scroll to the old caret"
+                );
+                assert_eq!(editor.model.cursor(), cursor);
+                assert_eq!(
+                    editor.model.line(55),
+                    Some(if checked {
+                        "- [x] 中文任务 🌱"
+                    } else {
+                        "- [ ] 中文任务 🌱"
+                    })
+                );
+            });
+        }
+    }
+    editor.update(cx, |editor, cx| editor.history(false, cx));
+    draw(cx);
+    assert!(
+        cx.read(|app| editor.read(app).text())
+            .contains("- [x] 中文任务 🌱")
+    );
+    editor.update(cx, |editor, cx| editor.history(true, cx));
+    draw(cx);
+    assert_eq!(cx.read(|app| editor.read(app).text()), text);
+}
+
+#[gpui::test]
+fn markdown_interaction_checkbox_preserves_selection_and_change_events(cx: &mut TestAppContext) {
+    cx.update(|cx| guise::Theme::light().init(cx));
+    let (editor, cx) = cx.add_window_view(|window, cx| {
+        let mut editor = MarkdownEditor::new(cx).value("中文 🌱\n\n- [ ] 待办");
+        editor.model.move_to(0, 4, false);
+        editor.model.move_to(0, 1, true);
+        window.focus(&editor.focus);
+        editor
+    });
+    let changes = Rc::new(std::cell::RefCell::new(Vec::new()));
+    let observed = changes.clone();
+    cx.update(|_, cx| {
+        cx.subscribe(&editor, move |_, event, _| {
+            if let MarkdownEditorEvent::Change(text) = event {
+                observed.borrow_mut().push(text.clone());
+            }
+        })
+        .detach();
+    });
+    draw(cx);
+    draw(cx);
+    let selection = cx.read(|app| editor.read(app).model.selection());
+    editor.update(cx, |editor, cx| {
+        assert!(editor.toggle_task(2, cx));
+    });
+    draw(cx);
+    cx.read(|app| {
+        let editor = editor.read(app);
+        assert_eq!(editor.model.selection(), selection);
+        assert_eq!(editor.model.cursor(), Pos::new(0, 1));
+    });
+    assert_eq!(*changes.borrow(), ["中文 🌱\n\n- [x] 待办"]);
+}
+
+fn link_modifiers() -> gpui::Modifiers {
+    gpui::Modifiers {
+        platform: cfg!(target_os = "macos"),
+        control: !cfg!(target_os = "macos"),
+        ..Default::default()
+    }
+}
+
+#[gpui::test]
+fn markdown_interaction_links_have_precise_regions_and_keep_editing(cx: &mut TestAppContext) {
+    cx.update(|cx| guise::Theme::light().init(cx));
+    let text = "intro\n\n[中文链接 🌱](https://example.com) 普通文字";
+    let (editor, cx) = cx.add_window_view(|window, cx| {
+        let editor = MarkdownEditor::new(cx).value(text).style(MarkdownStyle {
+            bare: true,
+            ..Default::default()
+        });
+        window.focus(&editor.focus);
+        editor
+    });
+    let links = Rc::new(std::cell::RefCell::new(Vec::new()));
+    let observed = links.clone();
+    cx.update(|_, cx| {
+        cx.subscribe(&editor, move |_, event, _| {
+            if let MarkdownEditorEvent::LinkClick(target) = event {
+                observed.borrow_mut().push(target.clone());
+            }
+        })
+        .detach();
+    });
+    draw(cx);
+    draw(cx);
+    let bounds = cx
+        .debug_bounds("markdown-link-2-0")
+        .expect("link needs its own pointer region");
+    cx.simulate_click(bounds.center(), link_modifiers());
+    draw(cx);
+    assert_eq!(*links.borrow(), ["https://example.com"]);
+    assert_eq!(
+        cx.read(|app| editor.read(app).model.cursor()),
+        Pos::new(0, 0)
+    );
+    cx.simulate_click(
+        point(bounds.right() + px(80.0), bounds.center().y),
+        link_modifiers(),
+    );
+    assert_eq!(
+        links.borrow().len(),
+        1,
+        "text beside a link must not open it"
+    );
+    cx.simulate_click(bounds.center(), gpui::Modifiers::none());
+    draw(cx);
+    assert_eq!(
+        links.borrow().len(),
+        1,
+        "plain click still edits in writable mode"
+    );
+    assert_eq!(cx.read(|app| editor.read(app).model.cursor().line), 2);
+    assert_eq!(cx.read(|app| editor.read(app).text()), text);
+    editor.update(cx, |editor, cx| editor.set_source_mode(true, cx));
+    draw(cx);
+    // GPUI debug bounds retain old selectors across cached frames; verify
+    // current event dispatch rather than interpreting stale bounds as elements.
+    cx.simulate_click(bounds.center(), link_modifiers());
+    draw(cx);
+    assert_eq!(
+        links.borrow().len(),
+        1,
+        "source mode must not activate preview links"
+    );
+    assert_eq!(cx.read(|app| editor.read(app).text()), text);
+}
+
+#[gpui::test]
+fn markdown_interaction_wrapped_table_links_work_in_read_only_mode(cx: &mut TestAppContext) {
+    cx.update(|cx| guise::Theme::light().init(cx));
+    let text = "intro\n\n| 名称 | 说明 |\n| :---: | ---: |\n| 普通 | [很长的中文链接名称 🌱 English English English](https://example.com/table) |\n\n- [ ] 只读任务";
+    let (editor, cx) = cx.add_window_view(|window, cx| {
+        let editor = MarkdownEditor::new(cx)
+            .value(text)
+            .read_only(true)
+            .style(MarkdownStyle {
+                bare: true,
+                ..Default::default()
+            });
+        window.focus(&editor.focus);
+        editor
+    });
+    let links = Rc::new(std::cell::RefCell::new(Vec::new()));
+    let observed = links.clone();
+    cx.update(|_, cx| {
+        cx.subscribe(&editor, move |_, event, _| {
+            if let MarkdownEditorEvent::LinkClick(target) = event {
+                observed.borrow_mut().push(target.clone());
+            }
+        })
+        .detach();
+    });
+    cx.simulate_resize(size(px(320.0), px(500.0)));
+    draw(cx);
+    draw(cx);
+    let regions = [
+        "markdown-link-4-0",
+        "markdown-link-4-1",
+        "markdown-link-4-2",
+    ]
+    .map(|selector| {
+        cx.debug_bounds(selector)
+            .unwrap_or_else(|| panic!("missing wrapped link region {selector}"))
+    });
+    for bounds in regions {
+        cx.simulate_click(bounds.center(), gpui::Modifiers::none());
+        draw(cx);
+    }
+    assert_eq!(
+        *links.borrow(),
+        [
+            "https://example.com/table",
+            "https://example.com/table",
+            "https://example.com/table"
+        ]
+    );
+    assert!(
+        cx.debug_bounds("markdown-task-6").is_none(),
+        "read-only checkbox is not an action"
+    );
+    let position = cx.read(|app| {
+        let editor = editor.read(app);
+        let row = &editor.layout[6];
+        editor.text_bounds.origin
+            + point(
+                px(row.inset / 2.0),
+                px(row.y.get() + row.pad_top + row.line_h / 2.0),
+            )
+    });
+    cx.simulate_click(position, gpui::Modifiers::none());
+    draw(cx);
+    assert_eq!(cx.read(|app| editor.read(app).text()), text);
+}
+
+#[gpui::test]
 fn rapid_input_paints_the_caret_at_the_latest_insertion_point(cx: &mut TestAppContext) {
     cx.update(|cx| guise::Theme::light().init(cx));
     let (editor, cx) = cx.add_window_view(|window, cx| {

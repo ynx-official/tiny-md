@@ -6,8 +6,8 @@
 //! markers replaced by bullets/checkboxes, fenced code highlighted — while
 //! the cursor line (and any line the selection touches) *reveals* its
 //! markdown syntax for editing. Text soft-wraps; list items keep a hanging
-//! indent; checkboxes toggle on click; links open on Cmd+click (plain click
-//! when read-only) via [`MarkdownEditorEvent::LinkClick`].
+//! indent; checkboxes toggle in place; links open on Ctrl+click (Cmd+click
+//! on macOS, plain click when read-only) via [`MarkdownEditorEvent::LinkClick`].
 //!
 //! ```ignore
 //! let editor = cx.new(|cx| {
@@ -82,7 +82,7 @@ mod render_regressions;
 pub enum MarkdownEditorEvent {
     /// The document changed. Carries the full new text.
     Change(String),
-    /// A link was activated (Cmd+click, or plain click when read-only).
+    /// A link was activated (Ctrl/Cmd+click, or plain click when read-only).
     /// Carries the target — a url or a wikilink page name.
     LinkClick(String),
     /// A read-only snapshot requested in a separate diagram window.
@@ -426,6 +426,69 @@ impl Row {
             .iter()
             .find(|cell| byte <= cell.source.end)
             .or_else(|| self.cells.last())
+    }
+
+    /// Use the painted glyph ranges for both pointer feedback and link activation.
+    /// Each wrapped visual row gets its own region; table cells retain alignment.
+    fn link_regions(&self) -> Vec<(Bounds<Pixels>, String)> {
+        if !self.cells.is_empty() {
+            return self
+                .cells
+                .iter()
+                .flat_map(|cell| {
+                    cell.row
+                        .link_regions()
+                        .into_iter()
+                        .map(|(mut bounds, target)| {
+                            bounds.origin += point(px(cell.x), px(self.pad_top));
+                            (bounds, target)
+                        })
+                })
+                .collect();
+        }
+        self.plan
+            .links
+            .iter()
+            .flat_map(|(source, target)| {
+                let start = vis_for_src(&self.plan.segs, source.start);
+                let end = vis_for_src(&self.plan.segs, source.end);
+                let boundaries = self.boundaries();
+                let starts = std::iter::once(0).chain(boundaries.iter().copied());
+                let ends = boundaries
+                    .iter()
+                    .copied()
+                    .chain(std::iter::once(self.plan.visible.len()));
+                starts
+                    .zip(ends)
+                    .enumerate()
+                    .filter_map(|(row, (row_start, row_end))| {
+                        let clipped_start = start.max(row_start);
+                        let clipped_end = end.min(row_end);
+                        if clipped_start >= clipped_end {
+                            return None;
+                        }
+                        let x = if clipped_start == row_start {
+                            self.align_offset(row)
+                        } else {
+                            self.pos_end(clipped_start).0
+                        };
+                        let width = self.pos_end(clipped_end).0 - x;
+                        (width > 0.0).then(|| {
+                            (
+                                Bounds::new(
+                                    point(
+                                        px(self.inset + x),
+                                        px(self.pad_top + row as f32 * self.line_h),
+                                    ),
+                                    gpui::size(px(width), px(self.line_h)),
+                                ),
+                                target.clone(),
+                            )
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect()
     }
 
     fn align_offset(&self, visual_row: usize) -> f32 {
@@ -931,9 +994,12 @@ impl MarkdownEditor {
 
     // markdown editing commands
 
-    /// Toggle the checkbox on `line` if it is a task item, preserving the
-    /// cursor. Returns whether the line was a task.
+    /// Toggle a task in place without moving the reading viewport or selection.
+    /// Returns whether the line was a writable task.
     pub fn toggle_task(&mut self, line: usize, cx: &mut Context<Self>) -> bool {
+        if self.read_only {
+            return false;
+        }
         let Some(text) = self.model.line(line) else {
             return false;
         };
@@ -941,13 +1007,25 @@ impl MarkdownEditor {
             return false;
         };
         let cursor = self.model.cursor();
+        let anchor = self
+            .model
+            .selection()
+            .map(|(start, end)| if cursor == start { end } else { start });
         self.edit(cx, |m| {
             // The marker prefix is ASCII, so `state` is also a char column.
             m.move_to(line, state, false);
             m.move_to(line, state + 1, true);
             m.insert(if checked { " " } else { "x" });
-            m.move_to(cursor.line, cursor.col, false);
+            if let Some(anchor) = anchor {
+                m.move_to(anchor.line, anchor.col, false);
+                m.move_to(cursor.line, cursor.col, true);
+            } else {
+                m.move_to(cursor.line, cursor.col, false);
+            }
         });
+        // The caret may be far outside the manually scrolled viewport. This
+        // in-place action must not follow it as ordinary typing does.
+        self.scroll_to_cursor = false;
         true
     }
 
@@ -1462,14 +1540,6 @@ impl MarkdownEditor {
             if in_slot && in_first_row && self.toggle_task(line, cx) {
                 return;
             }
-        }
-        // Cmd+click (plain click when read-only) follows links.
-        if (ev.modifiers.cmd() || self.read_only)
-            && let (Some(row), Some(text)) = (self.layout.get(line), self.model.line(line))
-            && let Some(target) = row.plan.link_at(byte_for_col(text, col))
-        {
-            cx.emit(MarkdownEditorEvent::LinkClick(target.to_string()));
-            return;
         }
         match ev.click_count {
             2 => {
@@ -2535,6 +2605,7 @@ impl MarkdownEditor {
                         .justify_center()
                         .text_size(px(12.0))
                         .text_color(dimmed)
+                        .when(!self.read_only, |preview| preview.cursor_pointer())
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(move |this, _, window, cx| {
@@ -2803,6 +2874,50 @@ impl MarkdownEditor {
                             .bg(accent),
                     );
                 }
+            }
+
+            // Transparent interaction regions sit above the glyph canvas so
+            // a hand cursor covers only the actual link text, including tables.
+            let link_regions = if self.source_mode {
+                Vec::new()
+            } else {
+                row.link_regions()
+            };
+            for (index, (bounds, target)) in link_regions.into_iter().enumerate() {
+                el = el.child(
+                    div()
+                        .absolute()
+                        .left(bounds.origin.x)
+                        .top(bounds.origin.y)
+                        .w(bounds.size.width)
+                        .h(bounds.size.height)
+                        .cursor_pointer()
+                        .debug_selector(move || format!("markdown-link-{i}-{index}"))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
+                                if ev.modifiers.cmd() || this.read_only {
+                                    this.caret.reset();
+                                    this.finish_composition(cx);
+                                    window.focus(&this.focus);
+                                    cx.emit(MarkdownEditorEvent::LinkClick(target.clone()));
+                                    cx.stop_propagation();
+                                }
+                            }),
+                        ),
+                );
+            }
+            if !self.read_only && matches!(row.plan.kind, RowKind::Task { .. }) {
+                el = el.child(
+                    div()
+                        .absolute()
+                        .left_0()
+                        .top_0()
+                        .w(px(row.inset))
+                        .h(px(row.pad_top + row.line_h))
+                        .cursor_pointer()
+                        .debug_selector(move || format!("markdown-task-{i}")),
+                );
             }
 
             row_divs.push(el);

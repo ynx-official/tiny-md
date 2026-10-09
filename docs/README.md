@@ -18,6 +18,7 @@
 | [拖放与 Windows 文件集成](05-operations/windows-shell-integration.md) | 拖放打开、右键入口、默认打开勾选项及重装 / 卸载清理 |
 | [验证记录](verification.md) | 自动检查、原生交互和输入法验收证据 |
 | [输入光标同步](04-quality/input-caret-synchronization.md) | 快速输入、换行与自动滚动的光标坐标修复及组合输入回归 |
+| [Markdown 交互](04-quality/markdown-interactions.md) | 复选框原位勾选、链接手形光标、表格与换行链接、只读与源码模式边界 |
 | [长文档渲染性能](04-quality/render-performance-analysis.md) | 实测开销、卡顿来源与优化顺序 |
 | [渲染性能优化](04-quality/render-performance-optimization.md) | 五项优化实现、缓存回归与原生复测边界 |
 | [流程图内存与独立查看](04-quality/diagram-memory-and-viewer.md) | 全图预渲染、固定高清整图缩放拖动、关闭回收及内存对照 |

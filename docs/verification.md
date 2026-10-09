@@ -4,6 +4,19 @@
 - 最后更新：2026-10-09
 - 关联文档：[文档索引](README.md)、[Windows 说明](05-operations/windows.md)
 
+## Markdown 交互与阅读位置（2026-10-09）
+
+- 新增四项 GPUI 回归先确认失败：勾选使滚动位置从 -1260 px 回到 -12 px、已有选区丢失，
+  普通链接与表格换行链接没有独立交互区域。
+- 修复后四项回归通过，覆盖普通 / 打字机模式的长文档连续勾选、反向选区、修改通知、
+  撤销 / 重做、Ctrl / Cmd 点击、只读表格链接的三行命中、周围文本与源码模式不误开链接。
+- `./scripts/check.ps1` 通过：17 项 Python 发布工具测试、当前版本资料、Rust 格式检查、
+  161 项工作区测试及 Clippy；原有一个 doctest 忽略。
+- `cargo build --locked -p tiny-md` 通过，生成 `target/debug/tiny-md.exe`；
+  x64 Windows GUI 子系统与九个嵌入图标帧校验通过，尚未替换已安装程序。
+- 原生 Windows / macOS 的实际手形光标与系统鼠标交互仍待验收；规则与验证边界见
+  [Markdown 交互](04-quality/markdown-interactions.md)。改动归入 `Unreleased`。
+
 ## 快速输入的光标位置（2026-10-09）
 
 - 用户确认中文和英文均出现光标错位。新增 GPUI paint 回归先复现长段落自动滚动时光标纵向偏移 12 px，
