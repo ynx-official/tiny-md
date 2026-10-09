@@ -47,13 +47,13 @@ Tiny MD 面向本机 Markdown 笔记和技术文档写作。
 
 | 浅色主题 | 深色主题 |
 |:---:|:---:|
-| [![浅色主题下的 Markdown 写作界面](assert/img/writing-light.png)](assert/img/writing-light.png) | [![深色主题下的 Markdown 写作界面](assert/img/writing-dark.png)](assert/img/writing-dark.png) |
+| [![浅色主题下的 Markdown 写作界面](assets/img/writing-light.png)](assets/img/writing-light.png) | [![深色主题下的 Markdown 写作界面](assets/img/writing-dark.png)](assets/img/writing-dark.png) |
 
 ### 🔄 在线更新
 
 检查版本、阅读 Markdown 更新日志；主题与自动更新选项在“文件 → 偏好设置”中管理。
 
-[![Tiny MD 在线更新与版本日志](assert/img/online-updates.png)](assert/img/online-updates.png)
+[![Tiny MD 在线更新与版本日志](assets/img/online-updates.png)](assets/img/online-updates.png)
 
 ## 🛠️ 技术栈
 
