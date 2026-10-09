@@ -46,6 +46,7 @@ enum Intent {
     New,
     Open,
     OpenPath(PathBuf),
+    SwitchPath(PathBuf),
     Reload,
     CreateFile(PathBuf),
     Close,
@@ -569,7 +570,7 @@ impl TinyMd {
         }
         self.finish_input(cx);
         // Opening keeps existing notes and drafts, reusing only a pristine
-        // untitled editor. Reloading still uses the save guard.
+        // untitled editor. Switching or reloading uses the save guard.
         if matches!(intent, Intent::Open | Intent::OpenPath(_)) || !self.dirty {
             self.execute(intent, window, cx);
             return;
@@ -608,9 +609,10 @@ impl TinyMd {
             Intent::New => self.install(Document::untitled(""), "", window, cx),
             Intent::Open => self.open(window, cx),
             Intent::OpenPath(path) => self.open_paths(vec![path], window, cx),
+            Intent::SwitchPath(path) => self.load_current_path(path, window, cx),
             Intent::Reload => {
                 if let Some(path) = self.document.path().map(Path::to_owned) {
-                    self.reload_path(path, window, cx);
+                    self.load_current_path(path, window, cx);
                 }
             }
             Intent::CreateFile(path) => self.create_library_file(path, window, cx),
@@ -667,7 +669,7 @@ impl TinyMd {
         self.refresh_documents(cx);
     }
 
-    fn reload_path(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+    fn load_current_path(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         self.set_busy(true, cx);
         let task = cx
             .background_executor()

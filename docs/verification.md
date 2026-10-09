@@ -4,6 +4,15 @@
 - 最后更新：2026-10-09
 - 关联文档：[文档索引](README.md)、[Windows 说明](05-operations/windows.md)
 
+## 侧栏当前窗口切换（2026-10-09）
+
+- 用户明确左侧文档列表 / 文档树默认在当前窗口打开，规则与入口区别见 [文档窗口](02-design/document-windows.md)。文件菜单、最近文件和拖放保留空白未命名窗口复用与已有文档保护。
+- 修改前五项回归实际失败：列表、树和右键打开多出一个窗口；有未保存修改时缺少切换确认。
+- `cargo test --locked -p tiny-md file_open_tests`：17 项通过，包含列表 / 树的实际点击、目录根节点保留、右键默认打开、显式新窗口打开，以及取消保留草稿、放弃后切换、保存原文件后切换。此前的空白未命名窗口复用、批量部分失败和重新加载保护继续通过。
+- `./scripts/check.ps1` 通过：17 项 Python 发布工具测试、当前版本资料、格式、165 项工作区测试（应用 57、文档 16、编辑器 77、更新器 15）和 Clippy；原有一个 doctest 忽略。
+- `cargo build --locked -p tiny-md` 通过；`target/debug/tiny-md.exe` 通过 x64 Windows GUI 子系统和九个嵌入图标帧校验；diff 检查通过。
+- 本轮使用 GPUI TestPlatform 验证窗口身份、渲染和点击事件，Windows / macOS 原生文件对话框与系统交互仍待验收。改动归入 `Unreleased`，未替换已安装程序或公开版本附件。
+
 ## Markdown 交互与阅读位置（2026-10-09）
 
 - 新增四项 GPUI 回归先确认失败：勾选使滚动位置从 -1260 px 回到 -12 px、已有选区丢失，

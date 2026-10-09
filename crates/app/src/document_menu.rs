@@ -164,7 +164,7 @@ impl TinyMd {
                     if directory {
                         self.toggle_folder(path, cx);
                     } else if self.document.path() != Some(path.as_path()) {
-                        self.request(Intent::OpenPath(path), window, cx);
+                        self.request(Intent::SwitchPath(path), window, cx);
                     }
                 }
             }
@@ -550,7 +550,7 @@ mod file_open_tests {
     use core::prelude::v1::test;
 
     #[gpui::test]
-    fn document_menu_open_creates_a_window(cx: &mut TestAppContext) {
+    fn document_menu_open_switches_in_the_current_window(cx: &mut TestAppContext) {
         init(cx);
         let directory = tempfile::tempdir().unwrap();
         let first = note(directory.path(), "first.md", "First note");
@@ -570,8 +570,36 @@ mod file_open_tests {
         });
         cx.run_until_parked();
         cx.read(|cx| {
+            assert_eq!(cx.windows().len(), 1);
+            assert_eq!(view.read(cx).document.path(), Some(second.as_path()));
+            assert_eq!(view.read(cx).editor.read(cx).text(), "Second note");
+        });
+    }
+
+    #[gpui::test]
+    fn explicit_open_window_keeps_the_current_document(cx: &mut TestAppContext) {
+        init(cx);
+        let directory = tempfile::tempdir().unwrap();
+        let first = note(directory.path(), "first.md", "First note");
+        let second = note(directory.path(), "second.md", "Second note");
+        let (view, cx) =
+            cx.add_window_view(|window, cx| TinyMd::new(Some(first.clone()), window, cx));
+        cx.update(|window, cx| {
+            view.update(cx, |this, cx| {
+                this.document_command(
+                    DocumentCommand::OpenWindow,
+                    Some(second.clone()),
+                    false,
+                    window,
+                    cx,
+                );
+            });
+        });
+        cx.run_until_parked();
+        cx.read(|cx| {
             assert_opened(cx, &second, "Second note");
             assert_eq!(view.read(cx).document.path(), Some(first.as_path()));
+            assert_eq!(view.read(cx).editor.read(cx).text(), "First note");
         });
     }
 }

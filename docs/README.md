@@ -10,7 +10,7 @@
 | [偏好设置与更新窗口](02-design/preferences.md) | 文件菜单入口、分类设置、主题持久化、后台下载和更新窗口重新排版 |
 | [应用图标](02-design/application-icons.md) | Windows 留白与 DPI 尺寸、macOS 独立素材、导出及资源核对 |
 | [外部文件同步](02-design/external-file-sync.md) | 自动同步、三方合并、冲突处理与撤销保护 |
-| [文档窗口](02-design/document-windows.md) | 空白未命名窗口复用、批量打开与原文档保护 |
+| [文档窗口](02-design/document-windows.md) | 侧栏当前窗口切换、空白未命名窗口复用与草稿保护 |
 | [在线更新设计](03-architecture/online-updates.md) | 已确认的三级更新源、下载校验、安装重启与发布边界 |
 | [在线更新验证](04-quality/online-updates.md) | 更新与发布工具回归、真实下载检查、平台验收边界 |
 | [Windows 安装版更新修复](04-quality/windows-installed-update.md) | 旧版重开根因、路径兼容、安装版助手与失败恢复回归 |

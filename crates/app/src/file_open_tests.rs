@@ -216,8 +216,7 @@ fn reload_stays_in_the_current_window_and_guards_unsaved_changes(cx: &mut TestAp
     });
 }
 
-#[gpui::test]
-fn sidebar_click_opens_a_window_and_keeps_the_library_root(cx: &mut TestAppContext) {
+fn check_sidebar_switch(cx: &mut TestAppContext, mode: SidebarMode, selector: &'static str) {
     init(cx);
     let directory = tempfile::tempdir().unwrap();
     let first = note(directory.path(), "first.md", "First note");
@@ -228,7 +227,54 @@ fn sidebar_click_opens_a_window_and_keeps_the_library_root(cx: &mut TestAppConte
     let (view, cx) = cx.add_window_view(|window, cx| {
         let mut view = TinyMd::new(Some(first.clone()), window, cx);
         view.sidebar = true;
+        view.sidebar_mode = mode;
         view
+    });
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        window.refresh();
+        window.draw(cx).clear();
+    });
+    let row = cx.debug_bounds(selector).expect("second note row");
+    cx.simulate_click(row.center(), Modifiers::none());
+    cx.run_until_parked();
+    cx.read(|cx| {
+        assert_eq!(cx.windows().len(), 1);
+        assert_eq!(view.read(cx).document.path(), Some(second.as_path()));
+        assert_eq!(view.read(cx).editor.read(cx).text(), "Second note");
+        assert_eq!(view.read(cx).library_root.as_deref(), Some(root.as_path()));
+    });
+}
+
+#[gpui::test]
+fn sidebar_list_switches_in_the_current_window(cx: &mut TestAppContext) {
+    check_sidebar_switch(cx, SidebarMode::Documents, "document-entry-1");
+}
+
+#[gpui::test]
+fn sidebar_tree_switches_in_the_current_window(cx: &mut TestAppContext) {
+    check_sidebar_switch(cx, SidebarMode::Tree, "document-entry-2");
+}
+
+#[gpui::test]
+fn sidebar_switch_cancel_keeps_unsaved_text_and_discard_opens_the_selected_note(
+    cx: &mut TestAppContext,
+) {
+    init(cx);
+    let directory = tempfile::tempdir().unwrap();
+    let first = note(directory.path(), "first.md", "First note");
+    let second = note(directory.path(), "second.md", "Second note");
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        let mut view = TinyMd::new(Some(first.clone()), window, cx);
+        view.sidebar = true;
+        view
+    });
+    cx.update(|_, cx| {
+        view.update(cx, |this, cx| {
+            this.editor.update(cx, |editor, cx| {
+                editor.command(EditorCommand::Wrap("**"), cx)
+            });
+        });
     });
     cx.run_until_parked();
     cx.update(|window, cx| {
@@ -239,17 +285,75 @@ fn sidebar_click_opens_a_window_and_keeps_the_library_root(cx: &mut TestAppConte
         .debug_bounds("document-entry-1")
         .expect("second note row");
     cx.simulate_click(row.center(), Modifiers::none());
+    assert!(
+        cx.has_pending_prompt(),
+        "switching notes must check unsaved content"
+    );
+    cx.simulate_prompt_answer("取消");
     cx.run_until_parked();
     cx.read(|cx| {
-        assert_opened(cx, &second, "Second note");
+        assert_eq!(cx.windows().len(), 1);
         assert_eq!(view.read(cx).document.path(), Some(first.as_path()));
-        let (_, opened) = cx.global::<Session>().windows.last().unwrap();
-        let opened = opened.upgrade().unwrap();
-        assert_eq!(
-            opened.read(cx).library_root.as_deref(),
-            Some(root.as_path())
-        );
+        assert_eq!(view.read(cx).editor.read(cx).text(), "**First** note");
+        assert!(view.read(cx).dirty);
+        assert!(!view.read(cx).busy);
     });
+    cx.update(|window, cx| {
+        window.refresh();
+        window.draw(cx).clear();
+    });
+    let row = cx
+        .debug_bounds("document-entry-1")
+        .expect("second note row");
+    cx.simulate_click(row.center(), Modifiers::none());
+    cx.simulate_prompt_answer("放弃修改");
+    cx.run_until_parked();
+    cx.read(|cx| {
+        assert_eq!(cx.windows().len(), 1);
+        assert_eq!(view.read(cx).document.path(), Some(second.as_path()));
+        assert_eq!(view.read(cx).editor.read(cx).text(), "Second note");
+        assert!(!view.read(cx).dirty);
+    });
+    assert_eq!(std::fs::read_to_string(first).unwrap(), "First note");
+}
+
+#[gpui::test]
+fn sidebar_switch_saves_the_original_note_before_loading_the_next(cx: &mut TestAppContext) {
+    init(cx);
+    let directory = tempfile::tempdir().unwrap();
+    let first = note(directory.path(), "first.md", "First note");
+    let second = note(directory.path(), "second.md", "Second note");
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        let mut view = TinyMd::new(Some(first.clone()), window, cx);
+        view.sidebar = true;
+        view
+    });
+    cx.update(|_, cx| {
+        view.update(cx, |this, cx| {
+            this.editor.update(cx, |editor, cx| {
+                editor.command(EditorCommand::Wrap("**"), cx)
+            });
+        });
+    });
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        window.refresh();
+        window.draw(cx).clear();
+    });
+    let row = cx
+        .debug_bounds("document-entry-1")
+        .expect("second note row");
+    cx.simulate_click(row.center(), Modifiers::none());
+    assert!(cx.has_pending_prompt());
+    cx.simulate_prompt_answer("保存并继续");
+    cx.run_until_parked();
+    cx.read(|cx| {
+        assert_eq!(cx.windows().len(), 1);
+        assert_eq!(view.read(cx).document.path(), Some(second.as_path()));
+        assert_eq!(view.read(cx).editor.read(cx).text(), "Second note");
+        assert!(!view.read(cx).dirty);
+    });
+    assert_eq!(std::fs::read_to_string(first).unwrap(), "**First** note");
 }
 
 #[gpui::test]

@@ -330,7 +330,7 @@ impl TinyMd {
                         if directory {
                             this.toggle_folder(click_path.clone(), cx);
                         } else if this.document.path() != Some(click_path.as_path()) {
-                            this.request(Intent::OpenPath(click_path.clone()), w, cx);
+                            this.request(Intent::SwitchPath(click_path.clone()), w, cx);
                         }
                     }))
                     .child(
