@@ -5,10 +5,14 @@
 
 ## [Unreleased]
 
+## [0.2.4] - 2026-10-09
+
 ### 修复
 
 - 勾选任务复选框保持当前阅读位置与选区，避免跳回文首。
 - 链接、可编辑复选框与流程图源码入口显示手形光标；补齐表格及换行链接的点击区域。
+
+详细交互规则、兼容性和本次跳过测试的说明见版本详情。
 
 ## [0.2.3] - 2026-10-09
 
@@ -77,6 +81,7 @@
 - 首次提供 macOS Apple Silicon DMG 和 Windows x64 安装包。
 - 原生 Markdown 写作窗口与基本文档操作。
 
+[0.2.4]: docs/06-delivery/versions/v0.2.4.md
 [0.2.3]: docs/06-delivery/versions/v0.2.3.md
 [0.2.2]: docs/06-delivery/versions/v0.2.2.md
 [0.2.1]: docs/06-delivery/versions/v0.2.1.md

@@ -6117,7 +6117,7 @@ dependencies = [
 
 [[package]]
 name = "tiny-md"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "anyhow",
  "embed-resource",
@@ -6138,7 +6138,7 @@ dependencies = [
 
 [[package]]
 name = "tiny-md-document"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "diffy",
  "notify",
@@ -6147,7 +6147,7 @@ dependencies = [
 
 [[package]]
 name = "tiny-md-editor"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "diffy",
  "gpui",
@@ -6159,7 +6159,7 @@ dependencies = [
 
 [[package]]
 name = "tiny-md-updater"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "anyhow",
  "reqwest",
