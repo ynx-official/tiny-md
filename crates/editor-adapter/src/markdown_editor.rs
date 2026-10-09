@@ -2818,6 +2818,10 @@ impl MarkdownEditor {
             move |bounds, window, cx| {
                 entity.update(cx, |this, cx| {
                     this.text_bounds = bounds;
+                    let caret_bounds = this.caret_bounds();
+                    this.caret_layer.update(cx, |layer, _| {
+                        layer.bounds = caret_bounds;
+                    });
                     let w = f32::from(bounds.size.width);
                     if (w - this.wrap_w).abs() > 0.5 {
                         this.wrap_w = w;
@@ -2915,27 +2919,8 @@ impl MarkdownEditor {
             body = body.min_h(px(rows as f32 * base_line_h + 2.0 * PAD_Y));
         }
 
-        let caret_bounds = self.layout.get(cursor.line).and_then(|row| {
-            let text = self.model.line(cursor.line)?;
-            let vis = vis_for_src(&row.plan.segs, byte_for_col(text, cursor.col));
-            let (x, vrow) = row.caret(vis);
-            let border = if style.bare { 0.0 } else { 1.0 };
-            Some(Bounds::new(
-                point(
-                    px(PAD_X + row.inset + x + border),
-                    px(padding
-                        + row.y.get()
-                        + row.pad_top
-                        + vrow as f32 * row.line_h
-                        + f32::from(self.scroll.offset().y)
-                        + border),
-                ),
-                gpui::size(px(1.0), px(row.line_h)),
-            ))
-        });
         self.caret_layer.update(cx, |layer, cx| {
-            if layer.bounds != caret_bounds || layer.color != caret_color {
-                layer.bounds = caret_bounds;
+            if layer.color != caret_color {
                 layer.color = caret_color;
                 cx.notify();
             }
@@ -2955,6 +2940,25 @@ impl MarkdownEditor {
             .text_color(text_color)
             .child(body)
             .into_any_element()
+    }
+
+    fn caret_bounds(&self) -> Option<Bounds<Pixels>> {
+        let cursor = self.model.cursor();
+        let row = self.layout.get(cursor.line)?;
+        let text = self.model.line(cursor.line)?;
+        let vis = vis_for_src(&row.plan.segs, byte_for_col(text, cursor.col));
+        let (x, vrow) = row.caret(vis);
+        let border = if self.style.bare { 0.0 } else { 1.0 };
+        // Use the measured content origin: prepaint may clamp the requested
+        // scroll offset as a wrapped paragraph grows or the viewport changes.
+        Some(Bounds::new(
+            self.text_bounds.origin - self.scroll.bounds().origin
+                + point(
+                    px(row.inset + x + border),
+                    px(row.y.get() + row.pad_top + vrow as f32 * row.line_h + border),
+                ),
+            gpui::size(px(1.0), px(row.line_h)),
+        ))
     }
 
     fn caret_is_visible(&self, cx: &App) -> bool {

@@ -1654,6 +1654,9 @@ fn main() {
             });
         if let Err(error) = result {
             eprintln!("更新失败：{error}");
+            if let Some(path) = args.get(1) {
+                tiny_md_updater::install::show_helper_failure(Path::new(path), &error);
+            }
             std::process::exit(1);
         }
         return;

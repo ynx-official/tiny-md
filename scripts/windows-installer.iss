@@ -78,6 +78,8 @@ Root: HKCU; Subkey: "Software\RegisteredApplications"; ValueType: string; ValueN
 Filename: "{app}\tiny-md.exe"; Description: "Launch Tiny MD"; Flags: nowait postinstall skipifsilent unchecked
 
 [Code]
+#include "windows-update-compat.iss"
+
 function WantsDefaultApps: Boolean;
 begin
   Result := WizardIsTaskSelected('defaultmd') or WizardIsTaskSelected('defaultmarkdown');

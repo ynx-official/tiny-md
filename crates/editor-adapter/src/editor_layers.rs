@@ -32,6 +32,8 @@ pub(super) struct CaretLayer {
     pub visible: bool,
     pub bounds: Option<Bounds<Pixels>>,
     pub color: Hsla,
+    #[cfg(test)]
+    pub painted_bounds: std::rc::Rc<std::cell::Cell<Option<Bounds<Pixels>>>>,
 }
 
 impl Default for CaretLayer {
@@ -40,17 +42,28 @@ impl Default for CaretLayer {
             visible: false,
             bounds: None,
             color: gpui::black(),
+            #[cfg(test)]
+            painted_bounds: Default::default(),
         }
     }
 }
 
 impl Render for CaretLayer {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        let caret = self.bounds.filter(|_| self.visible);
-        let color = self.color;
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let entity = cx.entity();
+        #[cfg(test)]
+        let painted_bounds = self.painted_bounds.clone();
         canvas(
             |_, _, _| (),
-            move |bounds, _, window, _| {
+            move |bounds, _, window, cx| {
+                // The cached document measures and scrolls during prepaint,
+                // after this layer can render. Read its final geometry at paint.
+                let layer = entity.read(cx);
+                let caret = layer.bounds.filter(|_| layer.visible);
+                let color = layer.color;
+                #[cfg(test)]
+                painted_bounds
+                    .set(caret.map(|caret| Bounds::new(bounds.origin + caret.origin, caret.size)));
                 if let Some(caret) = caret {
                     window.paint_quad(fill(
                         Bounds::new(bounds.origin + caret.origin, caret.size),

@@ -79,6 +79,99 @@ fn binary_version(binary: &Path, expected: &str) -> Result<()> {
     Ok(())
 }
 
+#[cfg(windows)]
+fn installer_path(path: &Path) -> Result<PathBuf> {
+    use std::{
+        ffi::OsString,
+        os::windows::ffi::{OsStrExt, OsStringExt},
+        path::{Component, Prefix},
+    };
+    ensure!(path.is_absolute(), "安装器路径必须为绝对路径");
+    // Rust canonicalize returns extended-length paths. Inno Setup 6 treats
+    // their '?' as an invalid directory character; normalize only disk/UNC
+    // prefixes at this boundary, preserving every UTF-16 filename character.
+    match path.components().next() {
+        Some(Component::Prefix(prefix)) => match prefix.kind() {
+            Prefix::Disk(_) | Prefix::UNC(_, _) => Ok(path.to_owned()),
+            Prefix::VerbatimDisk(_) => {
+                let wide: Vec<_> = path.as_os_str().encode_wide().skip(4).collect();
+                Ok(PathBuf::from(OsString::from_wide(&wide)))
+            }
+            Prefix::VerbatimUNC(_, _) => {
+                let wide: Vec<_> = [b'\\' as u16, b'\\' as u16]
+                    .into_iter()
+                    .chain(path.as_os_str().encode_wide().skip(8))
+                    .collect();
+                Ok(PathBuf::from(OsString::from_wide(&wide)))
+            }
+            _ => bail!("安装器不支持设备路径"),
+        },
+        _ => bail!("安装器路径缺少磁盘或共享目录"),
+    }
+}
+
+#[cfg(windows)]
+fn installer_command(payload: &Path, parent: &Path, log: &Path) -> Result<Command> {
+    let mut setup = command(payload);
+    setup.args([
+        "/SILENT",
+        "/SUPPRESSMSGBOXES",
+        "/SP-",
+        "/NORESTART",
+        "/CURRENTUSER",
+        "/NOCLOSEAPPLICATIONS",
+    ]);
+    for (key, path) in [("/DIR=", parent), ("/LOG=", log)] {
+        let mut argument = std::ffi::OsString::from(key);
+        argument.push(installer_path(path)?);
+        setup.arg(argument);
+    }
+    Ok(setup)
+}
+
+/// Report failures after handoff without initializing another GPUI editor.
+/// Before the handshake, the original application's update dialog reports them.
+pub fn show_helper_failure(plan_path: &Path, error: &str) {
+    #[cfg(windows)]
+    if let Some(root) = plan_path.parent()
+        && root.join("helper-ready").is_file()
+    {
+        use std::os::windows::ffi::OsStrExt;
+        #[link(name = "user32")]
+        unsafe extern "system" {
+            fn MessageBoxW(
+                window: *mut std::ffi::c_void,
+                text: *const u16,
+                caption: *const u16,
+                flags: u32,
+            ) -> i32;
+        }
+        let message = format!(
+            "Tiny MD 更新未完成。\n\n{error}\n\n诊断日志：{}",
+            root.join("install.log").display()
+        );
+        let wide = |text: &str| {
+            std::ffi::OsStr::new(text)
+                .encode_wide()
+                .chain(Some(0))
+                .collect::<Vec<_>>()
+        };
+        let message = wide(&message);
+        let caption = wide("Tiny MD 更新失败");
+        // Owned, NUL-terminated buffers remain alive for the modal native dialog.
+        unsafe {
+            MessageBoxW(
+                std::ptr::null_mut(),
+                message.as_ptr(),
+                caption.as_ptr(),
+                0x10 | 0x10000,
+            );
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = (plan_path, error);
+}
+
 /// A successful return means an acknowledged helper is waiting for this process.
 /// The UI must then quit; on error it must keep the writing windows open.
 pub fn launch(prepared: &PreparedUpdate) -> Result<()> {
@@ -220,6 +313,10 @@ pub fn helper_main(plan_path: &Path) -> Result<()> {
     validate_mac_bundle(&plan, &payload)?;
     #[cfg(windows)]
     {
+        if plan.kind == "setup" {
+            installer_path(plan.current.parent().context("安装目录无效")?)?;
+            installer_path(&root.join("installer.log"))?;
+        }
         ensure!(
             !fs::metadata(&plan.current)?.permissions().readonly(),
             "安装程序文件为只读，未退出写作窗口"
@@ -231,7 +328,10 @@ pub fn helper_main(plan_path: &Path) -> Result<()> {
     wait_for_parent(plan.process)?;
     let result = apply(&plan, &payload);
     if let Err(e) = &result {
-        eprintln!("更新失败：{e:#}。原程序与备份保留；请手动重新打开 Tiny MD。");
+        eprintln!(
+            "更新失败：{e:#}。诊断日志：{}",
+            root.join("install.log").display()
+        );
     }
     // Failed updates retain their evidence and payload for diagnosis. Successful
     // ones remove only fixed files in their own exclusive temporary directory.
@@ -311,7 +411,7 @@ fn apply(plan: &Plan, payload: &Path) -> Result<()> {
                 "Bypass",
                 "-File",
             ])
-            .arg(guard_script)
+            .arg(&guard_script)
             .arg("-Executable")
             .arg(&plan.current)
             .status()?;
@@ -319,18 +419,13 @@ fn apply(plan: &Plan, payload: &Path) -> Result<()> {
         let parent = plan.current.parent().context("安装目录无效")?;
         let result = with_backup(&plan.current, || {
             if plan.kind == "setup" {
-                let status = command(payload)
-                    .args([
-                        "/VERYSILENT",
-                        "/SUPPRESSMSGBOXES",
-                        "/SP-",
-                        "/NORESTART",
-                        "/CURRENTUSER",
-                        "/NOCLOSEAPPLICATIONS",
-                    ])
-                    .arg(format!("/DIR={}", parent.display()))
-                    .status()?;
-                ensure!(status.success(), "安装程序失败：{status}");
+                let log = guard_script.with_file_name("installer.log");
+                let status = installer_command(payload, parent, &log)?.status()?;
+                ensure!(
+                    status.success(),
+                    "安装程序失败：{status}。安装日志：{}",
+                    log.display()
+                );
             } else {
                 let mut staged = tempfile::NamedTempFile::new_in(parent)?;
                 std::io::copy(&mut File::open(payload)?, &mut staged)?;
@@ -506,6 +601,53 @@ fn with_backup(current: &Path, operation: impl FnOnce() -> Result<()>) -> Result
 #[cfg(all(test, windows))]
 mod tests {
     use super::*;
+    #[test]
+    fn installer_receives_normal_drive_and_unc_paths_without_losing_special_characters() {
+        for (source, expected) in [
+            (
+                r"\\?\C:\Users\中文 app's $() & folder",
+                r"C:\Users\中文 app's $() & folder",
+            ),
+            (r"\\?\UNC\server\share\Tiny MD", r"\\server\share\Tiny MD"),
+            (r"C:\Tiny MD", r"C:\Tiny MD"),
+            (r"\\server\share\Tiny MD", r"\\server\share\Tiny MD"),
+        ] {
+            assert_eq!(
+                installer_path(Path::new(source)).unwrap(),
+                Path::new(expected)
+            );
+        }
+        for path in [
+            r"relative\Tiny MD",
+            r"C:Tiny MD",
+            r"\\.\PhysicalDrive0",
+            r"\\?\Volume{123}\Tiny MD",
+        ] {
+            assert!(installer_path(Path::new(path)).is_err(), "accepted {path}");
+        }
+    }
+
+    #[test]
+    fn installed_update_shows_progress_and_records_a_log_without_closing_other_apps() {
+        let setup = installer_command(
+            Path::new(r"C:\temp\setup.exe"),
+            Path::new(r"\\?\C:\安装目录 app's $() & folder"),
+            Path::new(r"\\?\C:\temp\installer.log"),
+        )
+        .unwrap();
+        let args: Vec<_> = setup
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert!(args.iter().any(|arg| arg == "/SILENT"));
+        assert!(!args.iter().any(|arg| arg == "/VERYSILENT"));
+        assert!(args.iter().any(|arg| arg == "/NOCLOSEAPPLICATIONS"));
+        assert!(
+            args.iter()
+                .any(|arg| arg == r"/DIR=C:\安装目录 app's $() & folder")
+        );
+        assert!(args.iter().any(|arg| arg == r"/LOG=C:\temp\installer.log"));
+    }
     #[test]
     fn failed_replacement_restores_executable_and_version_in_paths_with_special_characters() {
         let root = tempfile::tempdir().unwrap();

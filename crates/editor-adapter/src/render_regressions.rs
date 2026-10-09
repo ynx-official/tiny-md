@@ -217,6 +217,146 @@ fn draw(cx: &mut gpui::VisualTestContext) {
 }
 
 #[gpui::test]
+fn rapid_input_paints_the_caret_at_the_latest_insertion_point(cx: &mut TestAppContext) {
+    cx.update(|cx| guise::Theme::light().init(cx));
+    let (editor, cx) = cx.add_window_view(|window, cx| {
+        let editor = MarkdownEditor::new(cx).style(MarkdownStyle {
+            bare: true,
+            ..Default::default()
+        });
+        window.focus(&editor.focus);
+        editor
+    });
+    cx.update(|window, _| window.activate_window());
+    cx.simulate_resize(size(px(300.0), px(200.0)));
+    draw(cx);
+    draw(cx);
+    let mut expected = String::new();
+    for batch in [
+        "hello",
+        " world",
+        " 中文🌱",
+        "\n",
+        "next paragraph ",
+        "fast typing ".repeat(20).as_str(),
+    ] {
+        // Deliver multiple native input callbacks before the next frame.
+        for ch in batch.chars() {
+            cx.update(|window, app| {
+                editor.update(app, |editor, cx| {
+                    editor.replace_text_in_range(None, &ch.to_string(), window, cx);
+                })
+            });
+            expected.push(ch);
+        }
+        draw(cx);
+        cx.update(|window, app| {
+            editor.update(app, |editor, cx| {
+                assert_eq!(editor.text(), expected);
+                assert_eq!(
+                    ime::selection(&editor.model),
+                    expected.encode_utf16().count()..expected.encode_utf16().count()
+                );
+                assert_painted_caret_at_cursor(editor, window, cx);
+            })
+        });
+    }
+}
+
+fn assert_painted_caret_at_cursor(
+    editor: &mut MarkdownEditor,
+    window: &mut Window,
+    cx: &mut Context<MarkdownEditor>,
+) {
+    let painted = editor
+        .caret_layer
+        .read(cx)
+        .painted_bounds
+        .get()
+        .expect("focused caret was painted");
+    let offset = ime::offset_utf16(&editor.model, editor.model.cursor());
+    let candidate = editor
+        .bounds_for_range(offset..offset, Bounds::default(), window, cx)
+        .unwrap();
+    assert!(
+        (f32::from(painted.origin.x - candidate.origin.x)).abs() < 1.0,
+        "painted caret {painted:?} lags insertion point {candidate:?}"
+    );
+    assert!(
+        (f32::from(painted.origin.y - candidate.origin.y)).abs() < 1.0,
+        "painted caret {painted:?} lags insertion point {candidate:?}"
+    );
+}
+
+#[gpui::test]
+fn composition_and_source_mode_keep_the_painted_caret_with_the_text(cx: &mut TestAppContext) {
+    cx.update(|cx| guise::Theme::light().init(cx));
+    let original = format!("# 标题\n\n{}", "中文 English 🌱 ".repeat(25));
+    let (editor, cx) = cx.add_window_view(|window, cx| {
+        let mut editor = MarkdownEditor::new(cx).value(&original);
+        editor.model.doc_end(false);
+        editor.scroll_to_cursor = true;
+        window.focus(&editor.focus);
+        editor
+    });
+    cx.update(|window, _| window.activate_window());
+    cx.simulate_resize(size(px(310.0), px(200.0)));
+    draw(cx);
+    draw(cx);
+    for source_mode in [false, true] {
+        editor.update(cx, |editor, cx| editor.set_source_mode(source_mode, cx));
+        draw(cx);
+        for (preedit, selected) in [("p", 1..1), ("pinyin", 0..6), ("拼音", 1..1)] {
+            cx.update(|window, app| {
+                editor.update(app, |editor, cx| {
+                    editor.replace_and_mark_text_in_range(
+                        None,
+                        preedit,
+                        Some(selected),
+                        window,
+                        cx,
+                    );
+                })
+            });
+            draw(cx);
+            cx.update(|window, app| {
+                editor.update(app, |editor, cx| {
+                    assert!(editor.is_composing());
+                    assert_painted_caret_at_cursor(editor, window, cx);
+                })
+            });
+        }
+        cx.update(|window, app| {
+            editor.update(app, |editor, cx| {
+                editor.replace_text_in_range(None, "输入法", window, cx);
+                editor.replace_text_in_range(None, " fast", window, cx);
+            })
+        });
+        draw(cx);
+        cx.update(|window, app| {
+            editor.update(app, |editor, cx| {
+                assert_eq!(editor.text(), format!("{original}输入法 fast"));
+                assert_painted_caret_at_cursor(editor, window, cx);
+                editor.history(false, cx);
+            })
+        });
+        draw(cx);
+        assert_eq!(
+            cx.read(|app| editor.read(app).text()),
+            format!("{original}输入法")
+        );
+        editor.update(cx, |editor, cx| editor.history(false, cx));
+        draw(cx);
+        cx.update(|window, app| {
+            editor.update(app, |editor, cx| {
+                assert_eq!(editor.text(), original);
+                assert_painted_caret_at_cursor(editor, window, cx);
+            })
+        });
+    }
+}
+
+#[gpui::test]
 fn focus_and_cross_cell_selection_update_syntax_reveal_in_cached_rows(cx: &mut TestAppContext) {
     cx.update(|cx| guise::Theme::light().init(cx));
     let (editor, cx) = cx.add_window_view(|window, cx| {
