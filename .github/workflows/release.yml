@@ -14,7 +14,7 @@ concurrency:
 
 env:
   # User-authorized exception for this release only; later tags run tests.
-  RELEASE_SKIP_TESTS: ${{ github.ref_name == 'v0.2.4' && 'true' || 'false' }}
+  RELEASE_SKIP_TESTS: ${{ github.ref_name == 'v0.2.5' && 'true' || 'false' }}
   CARGO_TERM_COLOR: always
   CARGO_BUILD_JOBS: 2
   CARGO_PROFILE_DEV_DEBUG: 0

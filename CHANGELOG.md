@@ -5,9 +5,15 @@
 
 ## [Unreleased]
 
+暂无。
+
+## [0.2.5] - 2026-10-09
+
 ### 修复
 
 - 侧栏文档列表 / 文档树默认在当前窗口打开文件，切换前检查未保存修改；显式新窗口打开继续保留原文档。
+
+详细变化见版本详情。
 
 ## [0.2.4] - 2026-10-09
 
@@ -85,6 +91,7 @@
 - 首次提供 macOS Apple Silicon DMG 和 Windows x64 安装包。
 - 原生 Markdown 写作窗口与基本文档操作。
 
+[0.2.5]: docs/06-delivery/versions/v0.2.5.md
 [0.2.4]: docs/06-delivery/versions/v0.2.4.md
 [0.2.3]: docs/06-delivery/versions/v0.2.3.md
 [0.2.2]: docs/06-delivery/versions/v0.2.2.md
