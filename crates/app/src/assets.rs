@@ -21,6 +21,12 @@ impl AssetSource for Assets {
                 "<path d='M20 7v5h-5M4 17v-5h5M6 7a7 7 0 0 1 12-1l2 6M18 17a7 7 0 0 1-12 1l-2-6'/>"
             }
             "icons/check.svg" => "<path d='m4 12 5 5 11-11'/>",
+            "icons/settings.svg" => {
+                "<path d='m9 3-.7 3-2.8 1-2.4-1.2L1.7 10l2.2 2-2.2 2 1.4 4.2 2.4-1.2 2.8 1L9 21h6l.7-3 2.8-1 2.4 1.2 1.4-4.2-2.2-2 2.2-2-1.4-4.2-2.4 1.2-2.8-1L15 3z'/><circle cx='12' cy='12' r='3'/>"
+            }
+            "icons/external-link.svg" => {
+                "<path d='M14 3h7v7M10 14 21 3M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5'/>"
+            }
             "icons/close.svg" => "<path d='m6 6 12 12M6 18 18 6'/>",
             "icons/window-minimize.svg" => "<path d='M6 12h12'/>",
             "icons/window-maximize.svg" => "<rect x='6' y='6' width='12' height='12'/>",
@@ -72,6 +78,8 @@ mod tests {
             IconName::WindowMaximize,
             IconName::WindowRestore,
             IconName::WindowClose,
+            IconName::Settings,
+            IconName::ExternalLink,
         ] {
             let path = icon.path();
             let asset = Assets

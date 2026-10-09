@@ -7,6 +7,7 @@
 | 文档 | 内容 |
 |---|---|
 | [UI 风格](02-design/ui-style.md) | 已确认的 notion 风格、原生应用适配、侧栏虚线调宽与独立滚动条 |
+| [偏好设置与更新窗口](02-design/preferences.md) | 文件菜单入口、分类设置、主题持久化、后台下载和更新窗口重新排版 |
 | [应用图标](02-design/application-icons.md) | Windows 留白与 DPI 尺寸、macOS 独立素材、导出及资源核对 |
 | [外部文件同步](02-design/external-file-sync.md) | 自动同步、三方合并、冲突处理与撤销保护 |
 | [文档窗口](02-design/document-windows.md) | 空白未命名窗口复用、批量打开与原文档保护 |
@@ -23,7 +24,8 @@
 | [开发路线](roadmap.md) | 现有功能与后续范围 |
 | [版本构建](releases.md) | macOS 与 Windows 安装包构建、优化配置及发布流程 |
 | [版本总览](06-delivery/versions/index.md) | 已发布历史与分版本唯一正文 |
-| [v0.2.2 版本详情](06-delivery/versions/v0.2.2.md) | Windows 在线更新与输入光标修复、窗口 / 侧栏改进及本次跳过测试的发布记录 |
+| [v0.2.3 版本详情](06-delivery/versions/v0.2.3.md) | 分类偏好设置、更新页重设计、后台自动下载与本次跳过测试的发布记录 |
+| [v0.2.2 版本详情](06-delivery/versions/v0.2.2.md) | Windows 在线更新与输入光标修复、窗口 / 侧栏改进及该次跳过测试的发布记录 |
 | [v0.2.1 版本详情](06-delivery/versions/v0.2.1.md) | 独立窗口、文件集成与本次跳过测试的发布记录 |
 | [v0.2.0 版本详情](06-delivery/versions/v0.2.0.md) | 在线更新等历史正式发布范围与验证记录 |
 | [变更日志](../CHANGELOG.md) | 用户摘要与未发布变化 |

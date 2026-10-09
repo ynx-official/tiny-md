@@ -6117,8 +6117,9 @@ dependencies = [
 
 [[package]]
 name = "tiny-md"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
+ "anyhow",
  "embed-resource",
  "gpui",
  "gpui-component",
@@ -6126,6 +6127,8 @@ dependencies = [
  "objc2",
  "objc2-app-kit",
  "objc2-foundation",
+ "serde",
+ "serde_json",
  "tempfile",
  "tiny-md-document",
  "tiny-md-editor",
@@ -6135,7 +6138,7 @@ dependencies = [
 
 [[package]]
 name = "tiny-md-document"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "diffy",
  "notify",
@@ -6144,7 +6147,7 @@ dependencies = [
 
 [[package]]
 name = "tiny-md-editor"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "diffy",
  "gpui",
@@ -6156,7 +6159,7 @@ dependencies = [
 
 [[package]]
 name = "tiny-md-updater"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "anyhow",
  "reqwest",

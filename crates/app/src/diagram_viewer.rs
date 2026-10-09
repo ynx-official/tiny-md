@@ -169,6 +169,9 @@ impl DiagramViewer {
 
 impl Render for DiagramViewer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(session) = cx.try_global::<crate::Session>() {
+            self.dark = session.dark;
+        }
         let (x, y) = self.viewport.origin();
         self.image.update(cx, |image, cx| {
             image.set_viewport(
@@ -437,6 +440,33 @@ mod tests {
             cx.read(|cx| view.read(cx).image.read(cx).decoded_size().is_none()),
             "native close must unload the high-definition bitmap immediately"
         );
+    }
+
+    #[gpui::test]
+    fn viewer_chrome_follows_the_global_theme_without_replacing_the_snapshot(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            cx.set_global(crate::Session::default());
+        });
+        let diagram = Diagram {
+            image: Arc::new(Image::from_bytes(ImageFormat::Svg, br##"<svg xmlns="http://www.w3.org/2000/svg" width="400" height="200"><rect width="400" height="200" fill="#edf6f1"/></svg>"##.to_vec())),
+            width: 400.0, height: 200.0,
+        };
+        let (view, cx) =
+            cx.add_window_view(|window, cx| DiagramViewer::new(diagram, false, window, cx));
+        let image_id = cx.read(|cx| view.read(cx).image.entity_id());
+        for dark in [true, false] {
+            cx.update(|window, cx| {
+                crate::apply_theme(dark, window, cx);
+                view.update(cx, |view, cx| {
+                    let _ = gpui::Render::render(view, window, cx);
+                    assert_eq!(view.dark, dark);
+                    assert_eq!(view.image.entity_id(), image_id);
+                });
+            });
+        }
     }
 
     #[cfg(target_os = "windows")]

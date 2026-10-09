@@ -23,6 +23,7 @@ mod file_open_tests;
 mod library;
 mod menus;
 mod panels;
+mod preferences;
 mod sidebar_resize;
 #[cfg(test)]
 mod sidebar_resize_tests;
@@ -72,6 +73,72 @@ fn remember(path: &Path, cx: &mut App) {
     session.recent.retain(|old| old != path);
     session.recent.insert(0, path.to_owned());
     session.recent.truncate(5);
+}
+
+fn apply_theme(dark: bool, window: &mut Window, cx: &mut App) {
+    cx.global_mut::<Session>().dark = dark;
+    guise_theme(dark).init(cx);
+    gpui_component::Theme::change(
+        if dark {
+            gpui_component::ThemeMode::Dark
+        } else {
+            gpui_component::ThemeMode::Light
+        },
+        Some(window),
+        cx,
+    );
+    #[cfg(target_os = "windows")]
+    apply_windows_theme(dark, cx);
+    let views = cx
+        .global::<Session>()
+        .windows
+        .iter()
+        .map(|(_, view)| view.clone())
+        .collect::<Vec<_>>();
+    // Menu actions may already borrow one document; update all editors after
+    // that borrow ends. Settings never replace text or reset writing modes.
+    cx.defer(move |cx| {
+        for view in views {
+            let _ = view.update(cx, |this, cx| {
+                if this.dark != dark {
+                    this.dark = dark;
+                    this.editor
+                        .update(cx, |editor, cx| editor.set_style(editor_style(dark), cx));
+                    cx.notify();
+                }
+            });
+        }
+    });
+    cx.refresh_windows();
+}
+
+fn utility_titlebar(label: &'static str, close_id: &'static str, dark: bool) -> AnyElement {
+    if cfg!(target_os = "windows") {
+        div()
+            .h(px(28.0))
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .bg(rgb(if dark { 0x222529 } else { 0xf0f3f9 }))
+            .child(
+                div()
+                    .flex_1()
+                    .px_3()
+                    .window_control_area(WindowControlArea::Drag)
+                    .child(label),
+            )
+            .child(
+                Button::new(close_id)
+                    .ghost()
+                    .label("×")
+                    .h_full()
+                    .w(px(40.0))
+                    .on_click(|_, window, _| window.remove_window()),
+            )
+            .into_any_element()
+    } else {
+        TitleBar::new().child(label).into_any_element()
+    }
 }
 
 fn continue_quit(cx: &mut App) {
@@ -815,45 +882,25 @@ impl TinyMd {
     }
 
     fn toggle_theme(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.dark = !self.dark;
-        cx.global_mut::<Session>().dark = self.dark;
-        guise_theme(self.dark).init(cx);
-        gpui_component::Theme::change(
-            if self.dark {
-                gpui_component::ThemeMode::Dark
-            } else {
-                gpui_component::ThemeMode::Light
-            },
-            Some(window),
-            cx,
-        );
-        #[cfg(target_os = "windows")]
-        apply_windows_theme(self.dark, cx);
-        self.editor.update(cx, |editor, cx| {
-            editor.set_style(editor_style(self.dark), cx)
-        });
-        let dark = self.dark;
-        let entity = cx.entity_id();
-        let views = cx
-            .global::<Session>()
-            .windows
-            .iter()
-            .map(|(_, view)| view.clone())
-            .collect::<Vec<_>>();
-        cx.defer(move |cx| {
-            for view in views {
-                if view.entity_id() == entity {
-                    continue;
-                }
-                let _ = view.update(cx, |this, cx| {
-                    this.dark = dark;
-                    this.editor
-                        .update(cx, |editor, cx| editor.set_style(editor_style(dark), cx));
-                    cx.notify();
-                });
-            }
-        });
-        cx.refresh_windows();
+        let dark = !self.dark;
+        if let Err(error) = preferences::save_theme(dark, cx) {
+            let answer = window.prompt(
+                PromptLevel::Warning,
+                "无法保存主题设置",
+                Some(&format!("{error:#}")),
+                &["确定"],
+                cx,
+            );
+            cx.spawn(async move |_, _| {
+                let _ = answer.await;
+            })
+            .detach();
+            return;
+        }
+        self.dark = dark;
+        self.editor
+            .update(cx, |editor, cx| editor.set_style(editor_style(dark), cx));
+        apply_theme(dark, window, cx);
     }
 
     fn jump(&mut self, line: usize, window: &mut Window, cx: &mut Context<Self>) {
@@ -1487,6 +1534,9 @@ impl Render for TinyMd {
             .on_action(cx.listener(|_, _: &About, w, cx| about(w, cx)))
             .on_action(cx.listener(|_, _: &CheckUpdates, _, cx| updates::show(cx, true, false)))
             .on_action(cx.listener(|_, _: &ReleaseNotes, _, cx| updates::show(cx, false, true)))
+            .on_action(cx.listener(|_, _: &OpenPreferences, _, cx| {
+                preferences::show(preferences::Category::Appearance, cx)
+            }))
             .on_action(cx.listener(|_, _: &Hide, _, cx| cx.hide()))
             .on_action(cx.listener(|_, _: &HideOthers, _, cx| cx.hide_other_apps()))
             .on_action(cx.listener(|_, _: &ShowAll, _, cx| cx.unhide_other_apps()))
@@ -1671,13 +1721,32 @@ fn main() {
             #[cfg(target_os = "macos")]
             app_icon::install();
             gpui_component::init(cx);
-            gpui_component::Theme::change(gpui_component::ThemeMode::Light, None, cx);
+            let dark = preferences::init(cx);
+            gpui_component::Theme::change(
+                if dark {
+                    gpui_component::ThemeMode::Dark
+                } else {
+                    gpui_component::ThemeMode::Light
+                },
+                None,
+                cx,
+            );
             #[cfg(target_os = "windows")]
-            apply_windows_theme(false, cx);
-            guise_theme(false).init(cx);
-            cx.set_global(Session::default());
+            apply_windows_theme(dark, cx);
+            guise_theme(dark).init(cx);
+            cx.set_global(Session {
+                dark,
+                ..Default::default()
+            });
             menus::bind(cx);
-            menus::install(cx, MenuState::default(), &[]);
+            menus::install(
+                cx,
+                MenuState {
+                    dark,
+                    ..Default::default()
+                },
+                &[],
+            );
             cx.on_action(|_: &QuitApplication, cx| quit(cx));
             cx.on_action(|action: &NewDocument, cx| {
                 if !forward_action(action, cx) {
@@ -1705,6 +1774,9 @@ fn main() {
             menus::register_forwarding(cx);
             cx.on_action(|_: &CheckUpdates, cx| updates::show(cx, true, false));
             cx.on_action(|_: &ReleaseNotes, cx| updates::show(cx, false, true));
+            cx.on_action(|_: &OpenPreferences, cx| {
+                preferences::show(preferences::Category::Appearance, cx)
+            });
             let empty = cfg!(target_os = "windows") && initial.is_none();
             open_editor_window(initial, empty, cx);
             updates::init(cx);

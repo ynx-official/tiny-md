@@ -15,6 +15,7 @@ actions!(
         About,
         CheckUpdates,
         ReleaseNotes,
+        OpenPreferences,
         Hide,
         HideOthers,
         ShowAll,
@@ -198,6 +199,8 @@ fn build(state: MenuState, recent: &[std::path::PathBuf], mac: bool) -> Vec<Menu
                     },
                     RevealDocument,
                 ),
+                MenuItem::separator(),
+                MenuItem::action("偏好设置…", OpenPreferences),
                 MenuItem::separator(),
                 MenuItem::action("关闭", CloseDocument),
             ],
@@ -405,6 +408,7 @@ fn bindings(mac: bool) -> Vec<KeyBinding> {
         platform_binding("cmd-shift-n", NewWindow, None, mac),
         platform_binding("cmd-o", OpenDocument, None, mac),
         platform_binding("cmd-q", QuitApplication, None, mac),
+        platform_binding("cmd-,", OpenPreferences, None, mac),
     ];
     if mac {
         bindings.extend([
@@ -684,6 +688,24 @@ mod tests {
                     MenuItem::Action {action: item_action, ..} if item_action.partial_eq(action)))
                 );
             }
+        }
+    }
+
+    #[test]
+    fn file_menu_and_global_shortcut_expose_preferences_on_both_platforms() {
+        for mac in [true, false] {
+            let menus = build(MenuState::default(), &[], mac);
+            let file = menus
+                .iter()
+                .find(|menu| menu.name.starts_with("文件"))
+                .unwrap();
+            assert!(file.items.iter().any(|item| matches!(item,
+                MenuItem::Action { action, .. } if action.partial_eq(&OpenPreferences))));
+            assert!(has_binding(
+                &bindings(mac),
+                if mac { "cmd-," } else { "ctrl-," },
+                &OpenPreferences
+            ));
         }
     }
 }
