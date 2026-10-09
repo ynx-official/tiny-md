@@ -1,12 +1,12 @@
 # 文档索引
 
 - 状态：Review
-- 最后更新：2026-10-08
+- 最后更新：2026-10-09
 - 关联文档：[项目说明](../README.md)
 
 | 文档 | 内容 |
 |---|---|
-| [UI 风格](02-design/ui-style.md) | 已确认的 notion 风格、原生应用适配与侧栏拖动调宽 |
+| [UI 风格](02-design/ui-style.md) | 已确认的 notion 风格、原生应用适配、侧栏虚线调宽与独立滚动条 |
 | [应用图标](02-design/application-icons.md) | Windows 留白与 DPI 尺寸、macOS 独立素材、导出及资源核对 |
 | [外部文件同步](02-design/external-file-sync.md) | 自动同步、三方合并、冲突处理与撤销保护 |
 | [文档窗口](02-design/document-windows.md) | 每篇笔记独立窗口、批量打开与原文档保护 |

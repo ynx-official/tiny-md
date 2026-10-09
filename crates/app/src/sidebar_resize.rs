@@ -50,8 +50,21 @@ impl TinyMd {
             .w(px(8.0))
             .h_full()
             .cursor(CursorStyle::ResizeLeftRight)
-            .hover(move |style| style.bg(highlight))
-            .when(dragging, |handle| handle.bg(highlight))
+            .when(dragging, |handle| {
+                handle.child(
+                    div()
+                        .id("sidebar-resize-guide")
+                        .debug_selector(|| "sidebar-resize-guide".into())
+                        .absolute()
+                        .left(px(4.0))
+                        .top_0()
+                        .w(px(1.0))
+                        .h_full()
+                        .border_l_1()
+                        .border_dashed()
+                        .border_color(highlight),
+                )
+            })
             .on_any_mouse_down(cx.listener(|this, event: &MouseDownEvent, window, cx| {
                 if event.button == MouseButton::Left {
                     this.sidebar_sizing.drag = Some((

@@ -2,6 +2,7 @@ use crate::*;
 use gpui_component::{
     Icon, IconName,
     menu::{ContextMenuExt, DropdownMenu},
+    scroll::{Scrollbar, ScrollbarShow},
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -168,18 +169,24 @@ impl TinyMd {
                         .on_click(cx.listener(move |this, _, _, cx| this.show_sidebar(mode, cx)))
                 }),
             );
+        let mode_index = self.sidebar_mode as usize;
+        let scroll = &self.sidebar_scroll[mode_index];
         let mut list = div()
-            .id("sidebar-content")
+            .id(("sidebar-content", mode_index))
+            .debug_selector(|| "sidebar-content".into())
             .flex()
             .flex_col()
             .flex_1()
             .min_h_0()
-            .overflow_y_scroll();
+            .min_w_0()
+            .overflow_y_scroll()
+            .track_scroll(scroll);
         if self.sidebar_mode == SidebarMode::Outline {
             list = list.px_4().children(self.headings.iter().map(|heading| {
                 let line = heading.line;
                 div()
                     .id(("heading", line))
+                    .debug_selector(move || format!("outline-heading-{line}"))
                     .py_2()
                     .flex_shrink_0()
                     .pl(px(heading.level.saturating_sub(1) as f32 * 10.0))
@@ -476,7 +483,29 @@ impl TinyMd {
                     )
                 },
             )
-            .child(list)
+            .child(
+                div()
+                    .relative()
+                    .flex()
+                    .flex_1()
+                    .min_h_0()
+                    // Leave a separate lane for resizing, outside the scrollbar's hit region.
+                    .mr(px(10.0))
+                    .child(list)
+                    .child(
+                        div()
+                            .id(("sidebar-scrollbar", mode_index))
+                            .debug_selector(|| "sidebar-scrollbar".into())
+                            .absolute()
+                            .top_0()
+                            .right_0()
+                            .w(px(16.0))
+                            .h_full()
+                            .child(
+                                Scrollbar::vertical(scroll).scrollbar_show(ScrollbarShow::Always),
+                            ),
+                    ),
+            )
             .when(self.sidebar_mode != SidebarMode::Outline, |panel| {
                 panel.child(
                     div()
