@@ -7,6 +7,14 @@
 
 暂无。
 
+## [0.2.6] - 2026-10-13
+
+### 修复
+
+- 收紧 Windows 排版模式的段落分隔空行，避免段落与标题之间出现过大的留白；保留源码和编辑行为。
+
+详细变化见版本详情。
+
 ## [0.2.5] - 2026-10-09
 
 ### 修复
@@ -91,6 +99,7 @@
 - 首次提供 macOS Apple Silicon DMG 和 Windows x64 安装包。
 - 原生 Markdown 写作窗口与基本文档操作。
 
+[0.2.6]: docs/06-delivery/versions/v0.2.6.md
 [0.2.5]: docs/06-delivery/versions/v0.2.5.md
 [0.2.4]: docs/06-delivery/versions/v0.2.4.md
 [0.2.3]: docs/06-delivery/versions/v0.2.3.md

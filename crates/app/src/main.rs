@@ -354,6 +354,7 @@ fn editor_style(dark: bool) -> MarkdownStyle {
     MarkdownStyle {
         bare: true,
         compact_headings: cfg!(target_os = "windows"),
+        compact_blank_lines: cfg!(target_os = "windows"),
         bg: Some(rgb(if dark { 0x222529 } else { 0xffffff }).into()),
         text: Some(rgb(if dark { 0xe4e6e9 } else { 0x24292f }).into()),
         caret: Some(rgb(if dark { 0xe4e6e9 } else { 0x24292f }).into()),

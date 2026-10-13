@@ -1,7 +1,7 @@
 # 文档索引
 
 - 状态：Review
-- 最后更新：2026-10-09
+- 最后更新：2026-10-13
 - 关联文档：[项目说明](../README.md)
 
 | 文档 | 内容 |
@@ -19,12 +19,14 @@
 | [验证记录](verification.md) | 自动检查、原生交互和输入法验收证据 |
 | [输入光标同步](04-quality/input-caret-synchronization.md) | 快速输入、换行与自动滚动的光标坐标修复及组合输入回归 |
 | [Markdown 交互](04-quality/markdown-interactions.md) | 复选框原位勾选、链接手形光标、表格与换行链接、只读与源码模式边界 |
+| [段落空行间距](04-quality/paragraph-spacing.md) | Windows 排版模式的分隔空行高度、连续空行与源码边界、编辑和缓存回归 |
 | [长文档渲染性能](04-quality/render-performance-analysis.md) | 实测开销、卡顿来源与优化顺序 |
 | [渲染性能优化](04-quality/render-performance-optimization.md) | 五项优化实现、缓存回归与原生复测边界 |
 | [流程图内存与独立查看](04-quality/diagram-memory-and-viewer.md) | 全图预渲染、固定高清整图缩放拖动、关闭回收及内存对照 |
 | [开发路线](roadmap.md) | 现有功能与后续范围 |
 | [版本构建](releases.md) | macOS 与 Windows 安装包构建、优化配置及发布流程 |
 | [版本总览](06-delivery/versions/index.md) | 已发布历史与分版本唯一正文 |
+| [v0.2.6 版本详情](06-delivery/versions/v0.2.6.md) | Windows 段落空行间距修复与本次跳过测试的发布记录 |
 | [v0.2.5 版本详情](06-delivery/versions/v0.2.5.md) | 侧栏当前窗口切换与简洁更新日志的发布记录 |
 | [v0.2.4 版本详情](06-delivery/versions/v0.2.4.md) | 复选框原位勾选、交互光标、表格与换行链接及该次跳过测试的发布记录 |
 | [v0.2.3 版本详情](06-delivery/versions/v0.2.3.md) | 分类偏好设置、更新页重设计、后台自动下载与该次跳过测试的发布记录 |

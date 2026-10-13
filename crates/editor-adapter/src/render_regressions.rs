@@ -217,6 +217,231 @@ fn draw(cx: &mut gpui::VisualTestContext) {
 }
 
 #[gpui::test]
+fn compact_separator_reduces_paragraph_spacing_without_changing_markdown(cx: &mut TestAppContext) {
+    cx.update(|cx| guise::Theme::light().init(cx));
+    let original = "# 标题\n\n## 小节\n\n1）第一段。\n\n2）第二段。\n\n3）第三段。";
+    let (editor, cx) = cx.add_window_view(|window, cx| {
+        let editor = MarkdownEditor::new(cx)
+            .value(original)
+            .font_size(16.0)
+            .style(MarkdownStyle {
+                bare: true,
+                compact_headings: true,
+                compact_blank_lines: true,
+                ..Default::default()
+            });
+        window.focus(&editor.focus);
+        editor
+    });
+    cx.simulate_resize(size(px(1064.0), px(700.0)));
+    draw(cx);
+    draw(cx);
+    cx.read(|app| {
+        let editor = editor.read(app);
+        assert_eq!(editor.text(), original);
+        assert_eq!(editor.layout.len(), 9);
+        for line in [1, 3, 5, 7] {
+            assert_eq!(editor.layout[line].height, 13.0);
+        }
+        for (previous, next) in [(4, 6), (6, 8)] {
+            assert_eq!(editor.layout[previous].plan.kind, RowKind::Paragraph);
+            assert_eq!(
+                editor.layout[next].y.get() - editor.layout[previous].y.get(),
+                39.0
+            );
+        }
+    });
+    editor.update(cx, |editor, cx| editor.set_font_size(20.0, cx));
+    draw(cx);
+    cx.read(|app| {
+        let editor = editor.read(app);
+        assert_eq!(editor.layout[5].height, 16.0);
+        assert_eq!(editor.layout[6].y.get() - editor.layout[4].y.get(), 48.0);
+        assert_eq!(editor.text(), original);
+    });
+}
+
+#[gpui::test]
+fn compact_separator_preserves_explicit_blank_lines_code_and_source_mode(cx: &mut TestAppContext) {
+    cx.update(|cx| guise::Theme::light().init(cx));
+    let original = "\n开头\n\n段落\n\n\n末段\n\n```rust\n\n```\n";
+    let (editor, cx) = cx.add_window_view(|window, cx| {
+        let editor = MarkdownEditor::new(cx)
+            .value(original)
+            .font_size(16.0)
+            .style(MarkdownStyle {
+                bare: true,
+                compact_blank_lines: true,
+                ..Default::default()
+            });
+        window.focus(&editor.focus);
+        editor
+    });
+    draw(cx);
+    draw(cx);
+    cx.read(|app| {
+        let editor = editor.read(app);
+        for line in [0, 4, 5, 11] {
+            assert_eq!(editor.layout[line].height, 26.0);
+        }
+        for line in [2, 7] {
+            assert_eq!(editor.layout[line].height, 13.0);
+        }
+        assert!(matches!(editor.layout[9].plan.kind, RowKind::Code { .. }));
+        assert_eq!(editor.layout[9].height, 22.0);
+        assert_eq!(editor.text(), original);
+    });
+    editor.update(cx, |editor, cx| editor.set_source_mode(true, cx));
+    draw(cx);
+    cx.read(|app| {
+        let editor = editor.read(app);
+        assert!(editor.layout.iter().all(|row| row.height == 22.0));
+        assert_eq!(editor.text(), original);
+    });
+    editor.update(cx, |editor, cx| {
+        editor.set_source_mode(false, cx);
+        editor.set_text("", cx);
+    });
+    draw(cx);
+    cx.read(|app| assert_eq!(editor.read(app).layout[0].height, 26.0));
+}
+
+#[gpui::test]
+fn compact_separator_updates_cached_neighbors_after_edit_undo_and_style_change(
+    cx: &mut TestAppContext,
+) {
+    cx.update(|cx| guise::Theme::light().init(cx));
+    let style = MarkdownStyle {
+        bare: true,
+        compact_blank_lines: true,
+        ..Default::default()
+    };
+    let original = "first\n\nsecond";
+    let (editor, cx) = cx.add_window_view(|window, cx| {
+        let editor = MarkdownEditor::new(cx)
+            .value(original)
+            .font_size(16.0)
+            .style(style);
+        window.focus(&editor.focus);
+        editor
+    });
+    draw(cx);
+    draw(cx);
+    cx.read(|app| assert_eq!(editor.read(app).layout[1].height, 13.0));
+    editor.update(cx, |editor, cx| {
+        editor.edit(cx, |model| {
+            model.move_to(2, 0, false);
+            model.newline();
+        });
+    });
+    draw(cx);
+    draw(cx);
+    cx.read(|app| {
+        let editor = editor.read(app);
+        assert_eq!(editor.text(), "first\n\n\nsecond");
+        assert_eq!(editor.layout[1].height, 26.0);
+        assert_eq!(editor.layout[2].height, 26.0);
+    });
+    editor.update(cx, |editor, cx| editor.history(false, cx));
+    draw(cx);
+    cx.read(|app| {
+        let editor = editor.read(app);
+        assert_eq!(editor.text(), original);
+        assert_eq!(editor.layout[1].height, 13.0);
+    });
+    for compact in [false, true] {
+        editor.update(cx, |editor, cx| {
+            editor.set_style(
+                MarkdownStyle {
+                    compact_blank_lines: compact,
+                    ..style
+                },
+                cx,
+            )
+        });
+        draw(cx);
+        cx.read(|app| {
+            assert_eq!(
+                editor.read(app).layout[1].height,
+                if compact { 13.0 } else { 26.0 }
+            );
+        });
+    }
+}
+
+#[gpui::test]
+fn compact_separator_keeps_click_input_selection_and_caret_coordinates(cx: &mut TestAppContext) {
+    cx.update(|cx| guise::Theme::light().init(cx));
+    let original = "第一段。\n\n第二段。";
+    let (editor, cx) = cx.add_window_view(|window, cx| {
+        let editor = MarkdownEditor::new(cx)
+            .value(original)
+            .font_size(16.0)
+            .style(MarkdownStyle {
+                bare: true,
+                compact_blank_lines: true,
+                ..Default::default()
+            });
+        window.focus(&editor.focus);
+        editor
+    });
+    cx.update(|window, _| window.activate_window());
+    draw(cx);
+    draw(cx);
+    let position = cx.read(|app| {
+        let editor = editor.read(app);
+        let row = &editor.layout[1];
+        assert_eq!(row.height, 13.0);
+        editor.text_bounds.origin + point(px(4.0), px(row.y.get() + row.height / 2.0))
+    });
+    cx.simulate_click(position, gpui::Modifiers::none());
+    draw(cx);
+    cx.update(|window, app| {
+        editor.update(app, |editor, cx| {
+            assert_eq!(editor.model.cursor(), Pos::new(1, 0));
+            assert_painted_caret_at_cursor(editor, window, cx);
+            editor.replace_and_mark_text_in_range(None, "pinyin", Some(6..6), window, cx);
+        });
+    });
+    draw(cx);
+    cx.update(|window, app| {
+        editor.update(app, |editor, cx| {
+            assert_eq!(editor.layout[1].height, 26.0);
+            assert_painted_caret_at_cursor(editor, window, cx);
+            editor.replace_text_in_range(None, "新段🌱", window, cx);
+        });
+    });
+    draw(cx);
+    cx.update(|window, app| {
+        editor.update(app, |editor, cx| {
+            assert_eq!(editor.text(), "第一段。\n新段🌱\n第二段。");
+            assert_painted_caret_at_cursor(editor, window, cx);
+            editor.history(false, cx);
+        });
+    });
+    draw(cx);
+    cx.read(|app| {
+        let editor = editor.read(app);
+        assert_eq!(editor.text(), original);
+        assert_eq!(editor.layout[1].height, 13.0);
+    });
+    editor.update(cx, |editor, cx| {
+        editor.edit(cx, |model| {
+            model.move_to(0, 0, false);
+            model.move_to(2, 4, true);
+        });
+    });
+    draw(cx);
+    cx.update(|window, app| {
+        editor.update(app, |editor, cx| {
+            assert_eq!(editor.model.copy().as_deref(), Some(original));
+            assert_eq!(editor.layout[1].height, 13.0);
+            assert_painted_caret_at_cursor(editor, window, cx);
+        });
+    });
+}
+
+#[gpui::test]
 fn markdown_interaction_checkbox_keeps_the_scrolled_view(cx: &mut TestAppContext) {
     cx.update(|cx| guise::Theme::light().init(cx));
     let text = (0..80)

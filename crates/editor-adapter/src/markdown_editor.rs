@@ -101,6 +101,8 @@ pub struct MarkdownStyle {
     pub bare: bool,
     /// Reduce display heading padding without changing text or cursor positions.
     pub compact_headings: bool,
+    /// Use half-height single blank separators in formatted mode.
+    pub compact_blank_lines: bool,
     pub bg: Option<Hsla>,
     pub text: Option<Hsla>,
     pub caret: Option<Hsla>,
@@ -145,12 +147,14 @@ struct LayoutStyle {
     base: f32,
     wrap: f32,
     compact: bool,
+    compact_blank_lines: bool,
     colors: Vec<Hsla>,
 }
 
 #[derive(Clone, PartialEq)]
 struct RowKey {
     block: Block,
+    compact_blank: bool,
     code: u64,
     table: u64,
     reveal: bool,
@@ -1982,6 +1986,7 @@ impl MarkdownEditor {
             base,
             wrap: wrap_total,
             compact: style.compact_headings,
+            compact_blank_lines: style.compact_blank_lines,
             colors: [
                 vec![
                     text_color,
@@ -2029,8 +2034,18 @@ impl MarkdownEditor {
                 !expanded[index]
                     && (blocks[index].is_mermaid() || matches!(block, Block::Fence { .. }))
             });
+            // Keep explicit blank runs and document-edge typing space full-height.
+            // Neighbor-dependent spacing belongs in the key: inserting a blank
+            // can change the height of an otherwise unchanged cached row.
+            let compact_blank = style.compact_blank_lines
+                && matches!(block, Block::Blank)
+                && i > 0
+                && i + 1 < parsed.blocks.len()
+                && !matches!(parsed.blocks[i - 1], Block::Blank)
+                && !matches!(parsed.blocks[i + 1], Block::Blank);
             let key = RowKey {
                 block: block.clone(),
+                compact_blank,
                 code: if self.source_mode {
                     parsed.source_signatures[i]
                 } else {
@@ -2074,6 +2089,11 @@ impl MarkdownEditor {
             let (pt, pb) = row_padding(&plan.kind, style.compact_headings);
             let size = (base * scale).round();
             let line_h = (size * lh).round();
+            let line_h = if compact_blank {
+                (line_h * 0.5).round()
+            } else {
+                line_h
+            };
             let mut pad_top = (base * pt).round();
             let mut pad_bottom = (base * pb).round();
 
