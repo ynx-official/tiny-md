@@ -42,8 +42,9 @@ Windows 与 macOS 应用均在 `MarkdownStyle` 中启用 `compact_blank_lines`�
 原有一个示例 doctest 继续忽略。检查使用 C 盘临时 target，不改变项目构建配置。
 `cargo build --locked -p tiny-md` 的 Windows 开发构建通过；最终 diff 空白检查通过。
 本轮尚未进行 macOS 原生界面或系统输入法验收；Windows 原生检查见下方初始修复记录。
-开发阶段归入 `Unreleased`，随后按用户要求准备 [v0.2.7](../06-delivery/versions/v0.2.7.md)，
-正式发布阶段跳过测试；已公开的 `v0.2.6` 正文与附件保留原状。
+开发阶段归入 `Unreleased`，随后按用户要求随 [v0.2.7](../06-delivery/versions/v0.2.7.md) 正式发布，
+正式发布阶段跳过测试。双平台 release 构建和七个公开附件的实际下载核对通过，
+稳定更新通道已指向 `v0.2.7`；此前八个公开版本的正文和附件元数据保持一致。
 
 ## Windows 初始修复验证（v0.2.6）
 
