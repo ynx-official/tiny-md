@@ -11,10 +11,11 @@
 编辑器按源行排版，空内容仍占至少一个正文行高，默认 16 px 字号下正文与空行均为 26 px，
 相邻单行段落的起点因此相隔 52 px。标题自身上下留白还会与分隔空行相加。
 
-Windows 应用在 `MarkdownStyle` 中启用 `compact_blank_lines`：排版模式中，
+Windows 与 macOS 应用均在 `MarkdownStyle` 中启用 `compact_blank_lines`：排版模式中，
 前后紧邻非空块的单个 `Block::Blank` 使用半行高度；默认字号下为 13 px，段落起点相隔 39 px。
 连续空行、文首 / 文末空行、空白文档、围栏代码及 frontmatter 内空行保持原规则。
-源码模式按原有等宽行高显示；默认样式未启用该选项，macOS 应用保持原排版。
+源码模式按原有等宽行高显示；编辑器的默认样式未启用该选项，由应用统一开启。
+平台差异仅保留在标题自身留白等既有设置，不影响段落分隔空行规则。
 该规则与焦点、选区和只读状态无关，移动光标不会使分隔空行展开或收缩。
 
 显示高度和光标 / 平台输入几何共享同一个 `line_h`，半行空白仍可点击、选择和输入。
@@ -22,7 +23,29 @@ Windows 应用在 `MarkdownStyle` 中启用 `compact_blank_lines`：排版模式
 相邻源行会影响单个空行的显示高度，因此行缓存键记录是否使用半行高度；
 插入或撤销相邻空行，以及运行时改变样式时，重新计算受影响的高度。
 
-## 自动验证
+## 双平台补齐与 Review（v0.2.7）
+
+2026-10-13 用户明确要求两端统一修复。Review 发现 `v0.2.6` 的应用配置通过
+`cfg!(target_os = "windows")` 仅在 Windows 开启半行分隔；macOS 使用同一渲染器，
+但未启用这项规则。原有四项编辑器测试手动设置 `compact_blank_lines: true`，
+因此无法捕获应用配置遗漏。共享行缓存、源码排除及输入几何实现未发现新的问题。
+
+应用样式构造统一开启空行压缩，保留标题留白的平台选择。
+新增 `platform_styles_share_paragraph_spacing_across_theme_changes` GPUI 回归，
+在 Windows 主机上分别使用 Windows / macOS 应用样式进行实际布局和输入边界查询。
+修改前 macOS 配置实际返回 26 px 空行，期望 13 px，回归失败；修正后通过。
+覆盖浅色、深色及切回浅色后的 13 px 空行、39 px 段落间隔、26 px 正文行高、
+源文保真和标题配置的平台差异。
+
+本轮 `./scripts/check.ps1` 通过：170 项 Rust 工作区测试（应用 58、文档 16、编辑器 81、
+更新器及集成测试 15）、17 项 Python 发布工具测试、当前版本资料校验、格式检查与 Clippy。
+原有一个示例 doctest 继续忽略。检查使用 C 盘临时 target，不改变项目构建配置。
+`cargo build --locked -p tiny-md` 的 Windows 开发构建通过；最终 diff 空白检查通过。
+本轮尚未进行 macOS 原生界面或系统输入法验收；Windows 原生检查见下方初始修复记录。
+开发阶段归入 `Unreleased`，随后按用户要求准备 [v0.2.7](../06-delivery/versions/v0.2.7.md)，
+正式发布阶段跳过测试；已公开的 `v0.2.6` 正文与附件保留原状。
+
+## Windows 初始修复验证（v0.2.6）
 
 四项 `compact_separator_` GPUI 回归先运行失败：空行实际高度均为 26 px，期望 13 px；
 实现后四项通过，覆盖：
@@ -44,7 +67,7 @@ Windows 应用在 `MarkdownStyle` 中启用 `compact_blank_lines`：排版模式
 `target/debug/tiny-md.exe`，两份程序 SHA-256 相同。`scripts/verify-windows-exe.ps1`
 确认 x64 GUI 子系统与九个嵌入图标帧符合项目约定。
 
-## 验收边界
+## Windows 初始修复验收边界
 
 自动化使用 GPUI TestPlatform 的布局、鼠标、输入回调和 paint 路径，
 不等同于 Windows GPU 绘制或真实系统输入法候选框验收。
@@ -54,5 +77,5 @@ Windows 应用在 `MarkdownStyle` 中启用 `compact_blank_lines`：排版模式
 点击分隔空行可定位细光标且不撑大间距。检查后关闭本轮开发窗口。
 原文件与副本在检查前后 SHA-256 均一致，没有写入或保存业务文档。
 本轮未进行真实中文输入法候选框、多 DPI 或 macOS 原生验收。
-开发阶段归入 `Unreleased`，未替换已安装程序。此修复已随 `v0.2.6` 正式发布，
+初始开发阶段归入 `Unreleased`，未替换已安装程序。Windows 修复已随 `v0.2.6` 正式发布，
 正式发版按用户要求跳过测试；发布状态与验证范围以[版本详情](../06-delivery/versions/v0.2.6.md)为准。

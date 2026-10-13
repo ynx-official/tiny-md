@@ -4,6 +4,17 @@
 - 最后更新：2026-10-13
 - 关联文档：[文档索引](README.md)、[Windows 说明](05-operations/windows.md)
 
+## 双平台段落空行补齐与 Review（2026-10-13，开发阶段）
+
+- Review 发现应用的 Windows 条件排除了 macOS；原有回归手动开启样式，未覆盖应用配置。
+  应用现已统一启用半行分隔，标题留白继续保留平台差异。
+- 新增 GPUI 回归先在 macOS 应用配置下实际失败（空行 26 px，期望 13 px），修正后通过；
+  覆盖双平台样式的浅色 / 深色切换、实际布局、输入边界及原文保真。
+- `./scripts/check.ps1` 通过：170 项工作区测试、17 项发布工具测试、当前版本资料检查、
+  Rust 格式及 Clippy；原有一个 doctest 忽略。测试运行在 Windows 主机的 GPUI TestPlatform，
+  未进行 macOS 原生界面或系统输入法验收。详细证据见 [段落空行间距](04-quality/paragraph-spacing.md)。
+- `cargo build --locked -p tiny-md` Windows 开发构建与最终 diff 空白检查通过；改动归入 `Unreleased`。
+
 ## Windows 段落空行间距（2026-10-13）
 
 用户随后要求正式发版并跳过测试，已随 `v0.2.6` 公开；双平台构建和七个公开附件的实际下载核对通过，

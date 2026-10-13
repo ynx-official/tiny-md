@@ -19,6 +19,8 @@ mod diagram_viewer;
 mod disk_sync;
 mod document_menu;
 #[cfg(test)]
+mod editor_style_tests;
+#[cfg(test)]
 mod file_open_tests;
 mod library;
 mod menus;
@@ -351,10 +353,15 @@ fn apply_windows_theme(dark: bool, cx: &mut App) {
 }
 
 fn editor_style(dark: bool) -> MarkdownStyle {
+    editor_style_for_platform(dark, cfg!(target_os = "windows"))
+}
+
+fn editor_style_for_platform(dark: bool, windows: bool) -> MarkdownStyle {
     MarkdownStyle {
         bare: true,
-        compact_headings: cfg!(target_os = "windows"),
-        compact_blank_lines: cfg!(target_os = "windows"),
+        compact_headings: windows,
+        // Paragraph separators share one rule across Windows and macOS.
+        compact_blank_lines: true,
         bg: Some(rgb(if dark { 0x222529 } else { 0xffffff }).into()),
         text: Some(rgb(if dark { 0xe4e6e9 } else { 0x24292f }).into()),
         caret: Some(rgb(if dark { 0xe4e6e9 } else { 0x24292f }).into()),

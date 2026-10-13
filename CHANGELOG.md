@@ -7,6 +7,14 @@
 
 暂无。
 
+## [0.2.7] - 2026-10-13
+
+### 修复
+
+- 补齐 macOS 段落分隔空行间距修复，与 Windows 共用相同规则。
+
+详细变化见版本详情。
+
 ## [0.2.6] - 2026-10-13
 
 ### 修复
@@ -99,6 +107,7 @@
 - 首次提供 macOS Apple Silicon DMG 和 Windows x64 安装包。
 - 原生 Markdown 写作窗口与基本文档操作。
 
+[0.2.7]: docs/06-delivery/versions/v0.2.7.md
 [0.2.6]: docs/06-delivery/versions/v0.2.6.md
 [0.2.5]: docs/06-delivery/versions/v0.2.5.md
 [0.2.4]: docs/06-delivery/versions/v0.2.4.md
