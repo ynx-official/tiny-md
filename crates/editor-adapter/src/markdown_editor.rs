@@ -580,6 +580,9 @@ pub struct MarkdownEditor {
     goal_x: Option<f32>,
     diagrams: std::collections::HashMap<DiagramKey, DiagramState>,
     diagram_views: std::collections::HashMap<usize, DiagramView>,
+    diagram_geometry_dirty: bool,
+    diagram_scrollbar_dragging: Rc<Cell<bool>>,
+    diagram_was_dragging: bool,
     code_highlights: syntax::Cache,
     copied_block: Option<usize>,
 }
@@ -651,6 +654,9 @@ impl MarkdownEditor {
             goal_x: None,
             diagrams: std::collections::HashMap::new(),
             diagram_views: std::collections::HashMap::new(),
+            diagram_geometry_dirty: false,
+            diagram_scrollbar_dragging: Rc::new(Cell::new(false)),
+            diagram_was_dragging: false,
             code_highlights: syntax::Cache::default(),
             copied_block: None,
         }
@@ -758,6 +764,9 @@ impl MarkdownEditor {
         self.copied_block = None;
         self.diagrams.clear();
         self.diagram_views.clear();
+        self.diagram_geometry_dirty = false;
+        self.diagram_scrollbar_dragging.set(false);
+        self.diagram_was_dragging = false;
         self.ime.reset();
         self.model.set_text(value);
         self.document_cache = DocumentCache::default();
@@ -796,6 +805,11 @@ impl MarkdownEditor {
     /// Share the document viewport with a host-owned scrollbar.
     pub fn scroll_handle(&self) -> ScrollHandle {
         self.scroll.clone()
+    }
+
+    /// Hosts report scrollbar thumb dragging so diagram sizes remain stable.
+    pub fn scrollbar_drag_state(&self) -> Rc<Cell<bool>> {
+        self.diagram_scrollbar_dragging.clone()
     }
 
     /// Toggle presentation without replacing the buffer, selection or history.
@@ -1803,6 +1817,32 @@ impl MarkdownEditor {
         let wrap_total = self.wrap_w.max(120.0);
         let previous = self.document_cache.current();
         let (parsed, changed) = self.document_cache.update(self.model.lines());
+        if !window.is_window_active() {
+            self.diagram_scrollbar_dragging.set(false);
+        }
+        let dragging = self.diagram_scrollbar_dragging.get();
+        self.diagram_geometry_dirty |= self.diagram_was_dragging && !dragging;
+        self.diagram_was_dragging = dragging;
+        let scroll_offset = self.scroll.offset();
+        let padding = if self.typewriter {
+            f32::from(self.scroll.bounds().size.height) * 0.45
+        } else {
+            PAD_Y
+        };
+        let top = (-f32::from(scroll_offset.y) - padding).max(0.0);
+        let diagram_anchor = (self.diagram_geometry_dirty
+            && !changed
+            && !self.source_mode
+            && !self.scroll_to_cursor)
+            .then(|| {
+                self.layout
+                    .iter()
+                    .enumerate()
+                    .find(|(_, row)| row.height > 0.0 && row.y.get() + row.height > top)
+                    .map(|(line, row)| (line, row.y.get()))
+            })
+            .flatten();
+        self.diagram_geometry_dirty = false;
         if changed {
             self.work.parsed_documents += 1;
             for mode in &mut self.mode_layouts {
@@ -1905,18 +1945,21 @@ impl MarkdownEditor {
             let cache_key = key.clone();
             let task_key = key.clone();
             let executor = cx.background_executor().clone();
+            let capacity = crate::diagram_work::layout(cx);
+            let ticket = crate::diagram_work::reserve_layout(cx);
             let task = cx.spawn(async move |this, cx| {
                 executor.timer(std::time::Duration::from_millis(180)).await;
-                let result = executor
-                    .spawn(async move { diagrams::render(&task_key) })
+                let ticket = ticket.wait().await;
+                // Waiting tasks use no worker thread. Keep the permit inside the
+                // worker so cancellation cannot overlap a still-running layout.
+                let permit = capacity.acquire_arc().await;
+                let (result, _ticket) = executor
+                    .spawn(async move {
+                        let _permit = permit;
+                        (diagrams::render(&task_key), ticket)
+                    })
                     .await;
                 let _ = this.update(cx, |this, cx| {
-                    let offset = f32::from(this.scroll.offset().y);
-                    let view_height = f32::from(this.scroll.bounds().size.height);
-                    let cursor_visible =
-                        this.cursor_vertical_bounds().is_some_and(|(top, bottom)| {
-                            top + offset >= 0.0 && bottom + offset <= view_height
-                        });
                     if let std::collections::hash_map::Entry::Occupied(mut entry) =
                         this.diagrams.entry(key)
                     {
@@ -1924,9 +1967,9 @@ impl MarkdownEditor {
                             Ok(diagram) => DiagramState::Ready(diagram),
                             Err(error) => DiagramState::Error(error),
                         });
-                        // A finished diagram changes source-row heights. Keep a
-                        // visible caret visible, without undoing manual scrolling.
-                        this.scroll_to_cursor |= cursor_visible;
+                        // Restore the reading row after correcting estimated
+                        // heights; loading must never pull the view to the caret.
+                        this.diagram_geometry_dirty = true;
                         cx.notify();
                     }
                 });
@@ -1935,18 +1978,31 @@ impl MarkdownEditor {
                 .insert(cache_key, DiagramState::Loading { _task: task });
         }
         // Invalidate a replaced source/theme even if its row is currently offscreen.
+        let mut preview_blocked = false;
+        let mut preview_order = vec![false; all_keys.len()];
         for (index, key) in all_keys.iter().enumerate() {
             if let Some(key) = key {
                 let diagram = match self.diagrams.get(key) {
                     Some(DiagramState::Ready(diagram)) => Some(diagram),
                     _ => None,
                 };
+                // Repeated SVG sources may be ready early. Their later rows
+                // still wait behind preceding diagrams before requesting pixels.
+                preview_blocked |=
+                    matches!(self.diagrams.get(key), Some(DiagramState::Loading { .. }));
+                preview_order[index] = !preview_blocked;
                 let view = self
                     .diagram_views
                     .get_mut(&parsed.code[index].start)
                     .unwrap();
+                view.reserve_space(
+                    &key.source,
+                    diagram,
+                    matches!(self.diagrams.get(key), Some(DiagramState::Error(_))),
+                    dragging,
+                );
                 view.retain_preview(diagram, cx);
-                if let Some(diagram) = diagram {
+                if let Some(diagram) = diagram.filter(|_| preview_order[index]) {
                     let (width, height) = diagram
                         .display_size(wrap_total - 32.0 - diagrams::PREVIEW_PADDING, view.zoom);
                     // Populate every diagram at document-open time; row elements remain virtualized.
@@ -1967,23 +2023,18 @@ impl MarkdownEditor {
                 block.touches(editing_range)
                     || keys[index].as_ref().is_some_and(|key| {
                         matches!(self.diagrams.get(key), Some(DiagramState::Error(_)))
+                            && self.diagram_views[&block.start].show_error_source
                     })
             })
             .collect::<Vec<_>>();
         let preview_heights = keys
             .iter()
             .enumerate()
-            .map(
-                |(index, key)| match key.as_ref().and_then(|key| self.diagrams.get(key)) {
-                    Some(DiagramState::Ready(diagram)) => {
-                        let zoom = self.diagram_views[&blocks[index].start].zoom;
-                        diagram.viewport_height(wrap_total - 32.0 - diagrams::PREVIEW_PADDING, zoom)
-                    }
-                    Some(DiagramState::Error(_)) => 96.0,
-                    Some(DiagramState::Loading { .. }) => 72.0,
-                    None => 0.0,
-                },
-            )
+            .map(|(index, key)| match key {
+                Some(_) => self.diagram_views[&blocks[index].start]
+                    .reserved_height(wrap_total - 32.0 - diagrams::PREVIEW_PADDING),
+                None => 0.0,
+            })
             .collect::<Vec<_>>();
         let mode = usize::from(self.source_mode);
         let layout_style = LayoutStyle {
@@ -2353,6 +2404,14 @@ impl MarkdownEditor {
             rows.push(self.mode_layouts[mode].rows.insert(i, key, row));
         }
         self.layout = rows;
+        if let Some((line, previous_y)) = diagram_anchor
+            && let Some(row) = self.layout.get(line)
+        {
+            self.scroll.set_offset(point(
+                scroll_offset.x,
+                scroll_offset.y - px(row.y.get() - previous_y),
+            ));
+        }
         if self.scroll_to_cursor {
             self.scroll_to_cursor = false;
             self.ensure_cursor_visible();
@@ -2624,6 +2683,7 @@ impl MarkdownEditor {
                         .right(px(15.0))
                         .top(px(top))
                         .h(px(preview_height))
+                        .overflow_hidden()
                         .flex()
                         .flex_col()
                         .items_center()
@@ -2644,13 +2704,12 @@ impl MarkdownEditor {
                             }),
                         );
                     match keys[index].as_ref().and_then(|key| self.diagrams.get(key)) {
-                        Some(DiagramState::Ready(diagram)) => {
+                        Some(DiagramState::Ready(diagram)) if preview_order[index] => {
                             let view = self.diagram_views.get_mut(&block.start).unwrap();
                             let available = wrap_total - 32.0;
                             let (width, height) = diagram
                                 .display_size(available - diagrams::PREVIEW_PADDING, view.zoom);
-                            let viewport_height = diagram
-                                .viewport_height(available - diagrams::PREVIEW_PADDING, view.zoom);
+                            let viewport_height = preview_height;
                             let image_view =
                                 view.preview(diagram, width, height, window.scale_factor(), cx);
                             preview = preview
@@ -2729,7 +2788,7 @@ impl MarkdownEditor {
                                         .child(error.clone()),
                                 );
                         }
-                        _ => preview = preview.child("正在绘制流程图…"),
+                        _ => preview = preview.child(diagrams::skeleton(rule_color, dimmed)),
                     }
                     el = el.child(preview);
                 }

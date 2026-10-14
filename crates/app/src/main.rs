@@ -442,11 +442,16 @@ impl TinyMd {
         });
         let scroll = editor.read(cx).scroll_handle();
         let mut scroll_offset = scroll.offset();
-        let document_scrollbar = cx.new(|_| document_scrollbar::DocumentScrollbar { scroll });
+        let dragging = editor.read(cx).scrollbar_drag_state();
+        let mut was_dragging = dragging.get();
+        let document_scrollbar =
+            cx.new(|_| document_scrollbar::DocumentScrollbar { scroll, dragging });
         cx.observe(&document_scrollbar, move |this, scrollbar, cx| {
             let offset = scrollbar.read(cx).scroll.offset();
-            if offset != scroll_offset {
+            let dragging = scrollbar.read(cx).dragging.get();
+            if offset != scroll_offset || dragging != was_dragging {
                 scroll_offset = offset;
+                was_dragging = dragging;
                 // Scrollbar events invalidate their own view. The cached
                 // document also needs to rebuild its visible rows and caret.
                 this.editor.update(cx, |_, cx| cx.notify());

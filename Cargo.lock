@@ -6149,6 +6149,7 @@ dependencies = [
 name = "tiny-md-editor"
 version = "0.2.7"
 dependencies = [
+ "async-lock",
  "diffy",
  "gpui",
  "guise-ui",

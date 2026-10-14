@@ -8,6 +8,7 @@ mod chord;
 mod code_blocks;
 mod commands;
 mod diagram_image;
+mod diagram_work;
 mod diagrams;
 mod editmenu;
 mod external_text;

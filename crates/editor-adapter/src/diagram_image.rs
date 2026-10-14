@@ -113,17 +113,25 @@ impl DiagramImage {
         let renderer = cx.svg_renderer();
         let executor = cx.background_executor().clone();
         let high_definition = self.high_definition;
+        let capacity = crate::diagram_work::raster(cx);
+        let ticket = crate::diagram_work::reserve_raster(cx);
         self.task = Some(cx.spawn(async move |this, cx| {
-            // Inline previews coalesce resizing; the independent viewer decodes immediately.
+            // Inline previews coalesce resizing; the independent viewer skips debounce.
             if !high_definition {
                 executor.timer(Duration::from_millis(100)).await;
             }
-            let result = executor
+            let ticket = ticket.wait().await;
+            // Preview and viewer windows share one decoder, bounding temporary
+            // pixel allocations without blocking the UI or executor threads.
+            let permit = capacity.acquire_arc().await;
+            let (result, _ticket) = executor
                 .spawn(async move {
-                    diagram
+                    let _permit = permit;
+                    let result = diagram
                         .image_at_size(requested)
                         .to_image_data(renderer)
-                        .map_err(|error| error.to_string())
+                        .map_err(|error| error.to_string());
+                    (result, ticket)
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
@@ -146,7 +154,13 @@ impl DiagramImage {
 }
 
 impl Render for DiagramImage {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        // The independent viewer also embeds this view, without Guise globals.
+        let text = window.text_style().color;
+        let surface = gpui::Hsla {
+            a: text.a * 0.15,
+            ..text
+        };
         div()
             .size_full()
             .relative()
@@ -169,11 +183,11 @@ impl Render for DiagramImage {
                 }
             })
             .when(self.image.is_none(), |el| {
-                el.child(if self.error.is_some() {
-                    "流程图显示失败"
+                if self.error.is_some() {
+                    el.child("流程图显示失败")
                 } else {
-                    "正在生成预览…"
-                })
+                    el.child(crate::diagrams::skeleton(surface, text))
+                }
             })
     }
 }
@@ -196,6 +210,61 @@ mod tests {
         cx.run_until_parked();
         cx.executor().advance_clock(Duration::from_millis(101));
         cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn diagram_pixels_wait_for_shared_capacity_and_cancel_obsolete_sizes(cx: &mut TestAppContext) {
+        let queue = cx.update(crate::diagram_work::raster);
+        let permit = queue.try_acquire_arc().unwrap();
+        let diagram = small_diagram();
+        let previews = (0..8)
+            .map(|_| {
+                let view = cx.new(|cx| DiagramImage::new(diagram.clone(), cx));
+                view.update(cx, |view, cx| view.set_display_size(300.0, 100.0, 1.0, cx));
+                view
+            })
+            .collect::<Vec<_>>();
+        let viewer = cx.new(|cx| DiagramImage::high_definition(diagram, cx));
+        finish_decoding(cx);
+        cx.read(|cx| {
+            assert!(
+                previews
+                    .iter()
+                    .all(|view| view.read(cx).decoded_size().is_none()),
+                "previews must wait asynchronously when the shared raster worker is busy"
+            );
+            assert!(
+                viewer.read(cx).decoded_size().is_none(),
+                "viewer must use the same limit"
+            );
+        });
+        let window = cx.add_empty_window();
+        window.update(|window, cx| viewer.update(cx, |image, cx| image.unload(window, cx)));
+        previews[0].update(cx, |view, cx| view.set_display_size(400.0, 200.0, 1.0, cx));
+        drop(permit);
+        finish_decoding(cx);
+        cx.read(|cx| {
+            assert_eq!(
+                previews[0].read(cx).decoded_size(),
+                Some(RasterSize {
+                    width: 400,
+                    height: 200
+                })
+            );
+            assert!(
+                previews
+                    .iter()
+                    .all(|view| view.read(cx).decoded_size().is_some())
+            );
+            assert!(
+                viewer.read(cx).decoded_size().is_none(),
+                "closed viewer must stay unloaded"
+            );
+        });
+        assert!(
+            queue.try_acquire_arc().is_some(),
+            "all raster capacity must be returned"
+        );
     }
 
     #[gpui::test]

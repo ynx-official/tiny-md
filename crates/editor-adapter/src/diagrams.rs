@@ -1,6 +1,9 @@
 //! Native Mermaid → SVG. GPUI decodes the SVG off the UI thread.
 use crate::diagram_image::DiagramImage;
-use gpui::{App, AppContext, Entity, Image, ImageFormat, ScrollHandle, Task, point, px};
+use gpui::{
+    App, AppContext, Div, Entity, Hsla, Image, ImageFormat, ScrollHandle, Task, div, point,
+    prelude::*, px,
+};
 use mermaid_rs_renderer::{
     LayoutConfig, Theme, compute_layout, measure_svg_dimensions, parse_mermaid_strict,
 };
@@ -27,9 +30,62 @@ pub struct DiagramView {
     pub zoom: Option<f32>,
     pub scroll: ScrollHandle,
     preview: Option<Entity<DiagramImage>>,
+    space: Option<(String, (f32, f32))>,
+    pub(crate) show_error_source: bool,
 }
 
 impl DiagramView {
+    pub fn reserve_space(
+        &mut self,
+        source: &str,
+        diagram: Option<&Diagram>,
+        error: bool,
+        locked: bool,
+    ) {
+        if self
+            .space
+            .as_ref()
+            .is_none_or(|(previous, _)| previous != source)
+        {
+            // Cheap source-based estimate only; exact layout stays off the UI thread.
+            let lines = source.lines().count().clamp(1, 200) as f32;
+            let horizontal = source
+                .lines()
+                .next()
+                .is_some_and(|line| line.contains(" LR") || line.contains(" RL"));
+            let height = if horizontal {
+                (lines * 24.0).clamp(240.0, 1200.0)
+            } else {
+                (lines * 64.0).clamp(240.0, 3200.0)
+            };
+            self.space = Some((source.to_owned(), (600.0, height)));
+            self.show_error_source = false;
+        }
+        if !locked {
+            self.show_error_source = error;
+            if let Some(diagram) = diagram {
+                self.space.as_mut().unwrap().1 = (diagram.width, diagram.height);
+            } else if error {
+                self.space.as_mut().unwrap().1 = (600.0, 72.0);
+            }
+        }
+    }
+
+    pub fn reserved_height(&self, available: f32) -> f32 {
+        if self.show_error_source {
+            return 96.0;
+        }
+        let (_, (width, height)) = self
+            .space
+            .as_ref()
+            .expect("diagram reserves space before layout");
+        height
+            * self
+                .zoom
+                .unwrap_or_else(|| (available.max(1.0) / width).min(2.0))
+            + PREVIEW_PADDING
+    }
+
     #[cfg(test)]
     pub(crate) fn preview_size(&self, cx: &App) -> Option<RasterSize> {
         self.preview
@@ -72,6 +128,47 @@ impl DiagramView {
         self.zoom = zoom.map(|zoom| zoom.clamp(0.25, 3.0));
         self.scroll.set_offset(point(px(0.0), px(0.0)));
     }
+}
+
+/// Static, theme-colored placeholders avoid adding animation work during loading.
+pub(crate) fn skeleton(surface: Hsla, text: Hsla) -> Div {
+    div()
+        .debug_selector(|| "diagram-skeleton".into())
+        .size_full()
+        .flex()
+        .flex_col()
+        .items_center()
+        .justify_center()
+        .gap(px(8.0))
+        .text_size(px(12.0))
+        .text_color(text)
+        .child(
+            div()
+                .w_full()
+                .max_w(px(112.0))
+                .h(px(28.0))
+                .rounded(px(6.0))
+                .bg(surface),
+        )
+        .child(div().w(px(2.0)).h(px(16.0)).bg(surface))
+        .child(
+            div()
+                .w_full()
+                .max_w(px(160.0))
+                .h(px(32.0))
+                .rounded(px(6.0))
+                .bg(surface),
+        )
+        .child(div().w(px(2.0)).h(px(16.0)).bg(surface))
+        .child(
+            div()
+                .w_full()
+                .max_w(px(112.0))
+                .h(px(28.0))
+                .rounded(px(6.0))
+                .bg(surface),
+        )
+        .child("正在生成流程图…")
 }
 
 impl Diagram {

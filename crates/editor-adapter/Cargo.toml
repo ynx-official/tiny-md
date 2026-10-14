@@ -6,6 +6,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+async-lock = "=3.4.2"
 diffy = { version = "=0.4.2", default-features = false }
 gpui.workspace = true
 guise.workspace = true

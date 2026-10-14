@@ -20,6 +20,92 @@ fn caret(view: &Entity<TinyMd>, offset: usize, cx: &mut VisualTestContext) -> Bo
 }
 
 #[gpui::test]
+fn document_scrollbar_drag_freezes_diagram_geometry_until_release(cx: &mut TestAppContext) {
+    file_open_tests::init(cx);
+    let chain = (0..12)
+        .map(|i| format!("A{i} --> A{}", i + 1))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let text = format!(
+        "Intro\n\n```mermaid\nflowchart TD\n{chain}\n```\n\n{}",
+        "Paragraph\n\n".repeat(100)
+    );
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        let mut view = TinyMd::new(None, window, cx);
+        view.install(Document::untitled(&text), &text, window, cx);
+        window.activate_window();
+        view
+    });
+    cx.simulate_resize(size(px(1000.0), px(500.0)));
+    draw(cx);
+    draw(cx);
+    let scroll = cx.read(|cx| view.read(cx).editor.read(cx).scroll_handle());
+    let pending_size = scroll.max_offset();
+    let track = cx.debug_bounds("document-scrollbar").unwrap();
+    let start = point(track.center().x, track.top() + px(12.0));
+    cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::none());
+    cx.background_executor
+        .advance_clock(std::time::Duration::from_millis(1000));
+    draw(cx);
+    assert_eq!(
+        scroll.max_offset(),
+        pending_size,
+        "loading must not resize the scroll range while dragging the thumb"
+    );
+    cx.simulate_mouse_up(start, MouseButton::Left, Modifiers::none());
+    draw(cx);
+    assert_ne!(
+        scroll.max_offset(),
+        pending_size,
+        "release must apply the true diagram size"
+    );
+    let settled_size = scroll.max_offset();
+    cx.background_executor
+        .advance_clock(std::time::Duration::from_millis(1000));
+    draw(cx);
+    assert_eq!(
+        scroll.max_offset(),
+        settled_size,
+        "bitmap completion must not change diagram geometry"
+    );
+    assert_eq!(cx.read(|cx| view.read(cx).editor.read(cx).text()), text);
+}
+
+#[gpui::test]
+fn document_scrollbar_drag_keeps_already_visible_diagram_errors(cx: &mut TestAppContext) {
+    file_open_tests::init(cx);
+    let text = format!(
+        "Intro\n\n```mermaid\nflowchart TD\nA[unclosed --> B\n```\n\n{}",
+        "Paragraph\n\n".repeat(100)
+    );
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        let mut view = TinyMd::new(None, window, cx);
+        view.install(Document::untitled(&text), &text, window, cx);
+        window.activate_window();
+        view
+    });
+    cx.simulate_resize(size(px(1000.0), px(500.0)));
+    draw(cx);
+    cx.background_executor
+        .advance_clock(std::time::Duration::from_millis(1000));
+    draw(cx);
+    let scroll = cx.read(|cx| view.read(cx).editor.read(cx).scroll_handle());
+    let before = scroll.max_offset();
+    let track = cx.debug_bounds("document-scrollbar").unwrap();
+    let start = point(track.center().x, track.top() + px(12.0));
+    cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::none());
+    draw(cx);
+    assert_eq!(
+        scroll.max_offset(),
+        before,
+        "starting a drag must preserve an existing error's expanded source"
+    );
+    cx.simulate_mouse_up(start, MouseButton::Left, Modifiers::none());
+    draw(cx);
+    assert_eq!(scroll.max_offset(), before);
+}
+
+#[gpui::test]
 fn document_scrollbar_stays_at_the_far_right_across_layouts(cx: &mut TestAppContext) {
     file_open_tests::init(cx);
     let text = "Paragraph\n\n".repeat(160);

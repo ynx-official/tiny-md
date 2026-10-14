@@ -2,6 +2,245 @@ use super::*;
 use gpui::TestAppContext;
 use gpui::{EntityInputHandler, ScrollDelta, ScrollWheelEvent, size};
 
+#[gpui::test(iterations = 10)]
+fn diagram_open_order_follows_the_document(cx: &mut TestAppContext) {
+    cx.update(|cx| guise::Theme::light().init(cx));
+    let capacity = cx.update(crate::diagram_work::layout);
+    let permit = capacity.try_acquire_arc().unwrap();
+    let sources = (0..8)
+        .map(|i| format!("flowchart LR\nA{i} --> B{i}"))
+        .collect::<Vec<_>>();
+    let text = sources
+        .iter()
+        .map(|source| format!("```mermaid\n{source}\n```\n\n"))
+        .collect::<String>();
+    let (editor, cx) =
+        cx.add_window_view(|_, cx| MarkdownEditor::new(cx).value(&text).read_only(true));
+    let order = Rc::new(std::cell::RefCell::new(Vec::new()));
+    let observed = order.clone();
+    let keys = sources
+        .iter()
+        .map(|source| DiagramKey {
+            source: source.clone(),
+            dark: false,
+        })
+        .collect::<Vec<_>>();
+    cx.update(|_, cx| {
+        cx.observe(&editor, move |editor, cx| {
+            let editor = editor.read(cx);
+            let mut order = observed.borrow_mut();
+            for (index, key) in keys.iter().enumerate() {
+                if matches!(editor.diagrams.get(key), Some(DiagramState::Ready(_)))
+                    && !order.contains(&index)
+                {
+                    order.push(index);
+                }
+            }
+        })
+        .detach();
+    });
+    draw(cx);
+    cx.background_executor
+        .advance_clock(std::time::Duration::from_millis(181));
+    cx.run_until_parked();
+    drop(permit);
+    for _ in 0..3 {
+        draw(cx);
+        cx.background_executor
+            .advance_clock(std::time::Duration::from_millis(1000));
+    }
+    draw(cx);
+    assert_eq!(
+        *order.borrow(),
+        (0..8).collect::<Vec<_>>(),
+        "diagrams must appear from the start to the end of the document"
+    );
+}
+
+#[gpui::test]
+fn diagram_open_keeps_later_cached_duplicates_behind_pending_diagrams(cx: &mut TestAppContext) {
+    cx.update(|cx| guise::Theme::light().init(cx));
+    let capacity = cx.update(crate::diagram_work::layout);
+    let permit = capacity.try_acquire_arc().unwrap();
+    let first = "flowchart LR\nA --> B";
+    let key = DiagramKey {
+        source: first.into(),
+        dark: false,
+    };
+    let cached = diagrams::render(&key).unwrap();
+    let text = format!(
+        "```mermaid\n{first}\n```\n\n```mermaid\nflowchart TD\nC --> D\n```\n\n```mermaid\n{first}\n```"
+    );
+    let (editor, cx) = cx.add_window_view(|_, cx| {
+        let mut editor = MarkdownEditor::new(cx).value(&text).read_only(true);
+        editor.diagrams.insert(key, DiagramState::Ready(cached));
+        editor
+    });
+    draw(cx);
+    cx.background_executor
+        .advance_clock(std::time::Duration::from_millis(1000));
+    draw(cx);
+    cx.read(|cx| {
+        let editor = editor.read(cx);
+        let blocks = &editor.document_cache.current().unwrap().code;
+        assert!(
+            editor.diagram_views[&blocks[0].start]
+                .preview_size(cx)
+                .is_some()
+        );
+        assert!(
+            editor.diagram_views[&blocks[2].start]
+                .preview_size(cx)
+                .is_none(),
+            "a later cached SVG must not jump the document's decode order"
+        );
+    });
+    drop(permit);
+    for _ in 0..3 {
+        cx.background_executor
+            .advance_clock(std::time::Duration::from_millis(1000));
+        draw(cx);
+    }
+    assert!(cx.read(|cx| {
+        editor
+            .read(cx)
+            .diagram_views
+            .values()
+            .all(|view| view.preview_size(cx).is_some())
+    }));
+}
+
+#[gpui::test]
+fn diagram_open_skeleton_and_height_changes_keep_the_reading_anchor(cx: &mut TestAppContext) {
+    cx.update(|cx| guise::Theme::light().init(cx));
+    let capacity = cx.update(crate::diagram_work::layout);
+    let permit = capacity.try_acquire_arc().unwrap();
+    let source = format!(
+        "flowchart TD\n{}",
+        (0..10)
+            .map(|i| format!("A{i} --> A{}", i + 1))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+    let text = format!(
+        "Intro\n\n```mermaid\n{source}\n```\n\n{}Reading target\n{}",
+        "before\n".repeat(40),
+        "after\n".repeat(100)
+    );
+    let target = text
+        .lines()
+        .position(|line| line == "Reading target")
+        .unwrap();
+    let (editor, cx) =
+        cx.add_window_view(|_, cx| MarkdownEditor::new(cx).value(&text).read_only(true));
+    cx.simulate_resize(size(px(1000.0), px(500.0)));
+    draw(cx);
+    draw(cx);
+    let skeleton = cx
+        .debug_bounds("diagram-skeleton")
+        .expect("pending diagrams need a skeleton");
+    assert!(
+        skeleton.size.height >= px(200.0),
+        "reserve space instead of a 72 px loading label"
+    );
+    let pending_height = cx.read(|cx| editor.read(cx).layout[2].height);
+    editor.update(cx, |editor, cx| {
+        let offset = 100.0 - editor.layout[target].y.get();
+        editor.scroll.set_offset(point(px(0.0), px(offset)));
+        cx.notify();
+    });
+    draw(cx);
+    let before = cx.read(|cx| {
+        let editor = editor.read(cx);
+        editor.layout[target].y.get() + f32::from(editor.scroll.offset().y)
+    });
+    drop(permit);
+    for _ in 0..3 {
+        cx.background_executor
+            .advance_clock(std::time::Duration::from_millis(1000));
+        draw(cx);
+    }
+    cx.read(|cx| {
+        let editor = editor.read(cx);
+        assert_ne!(
+            editor.layout[2].height, pending_height,
+            "the test must exercise a real size correction"
+        );
+        let after = editor.layout[target].y.get() + f32::from(editor.scroll.offset().y);
+        assert!(
+            (before - after).abs() < 0.5,
+            "diagram loading moved the reading target: {before} -> {after}"
+        );
+        assert_eq!(editor.text(), text);
+    });
+}
+
+#[gpui::test]
+fn diagram_layout_waits_for_capacity_and_cancels_replaced_documents(cx: &mut TestAppContext) {
+    cx.update(|cx| guise::Theme::light().init(cx));
+    let queue = cx.update(crate::diagram_work::layout);
+    let permit = queue.try_acquire_arc().unwrap();
+    let old_text = (0..12)
+        .map(|i| format!("```mermaid\nflowchart LR\nA{i} --> B{i}\n```\n\n"))
+        .collect::<String>();
+    let (editor, cx) = cx.add_window_view(|window, cx| {
+        let mut editor = MarkdownEditor::new(cx)
+            .value(&old_text)
+            .style(MarkdownStyle {
+                bare: true,
+                ..Default::default()
+            });
+        editor.set_read_only(true, cx);
+        window.focus(&editor.focus);
+        editor
+    });
+    draw(cx);
+    cx.background_executor
+        .advance_clock(std::time::Duration::from_millis(1000));
+    draw(cx);
+    cx.read(|cx| {
+        let editor = editor.read(cx);
+        assert_eq!(editor.diagrams.len(), 12);
+        assert!(
+            editor
+                .diagrams
+                .values()
+                .all(|state| matches!(state, DiagramState::Loading { .. })),
+            "no Mermaid layout may run while the shared worker is occupied"
+        );
+    });
+    let new_text = "replacement\n\n```mermaid\nflowchart TD\nNew --> Document\n```";
+    editor.update(cx, |editor, cx| editor.set_text(new_text, cx));
+    draw(cx);
+    drop(permit);
+    for _ in 0..3 {
+        cx.background_executor
+            .advance_clock(std::time::Duration::from_millis(1000));
+        draw(cx);
+    }
+    cx.read(|cx| {
+        let editor = editor.read(cx);
+        assert_eq!(editor.text(), new_text);
+        assert_eq!(editor.diagrams.len(), 1);
+        assert!(
+            editor
+                .diagrams
+                .values()
+                .all(|state| matches!(state, DiagramState::Ready(_)))
+        );
+        assert!(
+            editor
+                .diagram_views
+                .values()
+                .all(|view| view.preview_size(cx).is_some())
+        );
+    });
+    assert!(
+        queue.try_acquire_arc().is_some(),
+        "cancellation must release capacity"
+    );
+}
+
 #[gpui::test]
 fn all_diagrams_finish_decoding_after_open_without_any_scroll(cx: &mut TestAppContext) {
     cx.update(|cx| guise::Theme::light().init(cx));

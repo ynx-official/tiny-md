@@ -23,7 +23,7 @@
 | [正文滚动条](04-quality/document-scrollbar.md) | 窗口最右侧窄滚动条、内容长度与滚动位置、渲染缓存同步及模式 / 主题回归 |
 | [长文档渲染性能](04-quality/render-performance-analysis.md) | 实测开销、卡顿来源与优化顺序 |
 | [渲染性能优化](04-quality/render-performance-optimization.md) | 五项优化实现、缓存回归与原生复测边界 |
-| [流程图内存与独立查看](04-quality/diagram-memory-and-viewer.md) | 全图预渲染、固定高清整图缩放拖动、关闭回收及内存对照 |
+| [流程图内存与独立查看](04-quality/diagram-memory-and-viewer.md) | 从头到尾预渲染、并发控制、骨架占位与滚动稳定、固定高清图、关闭回收及内存对照 |
 | [开发路线](roadmap.md) | 现有功能与后续范围 |
 | [版本构建](releases.md) | macOS 与 Windows 安装包构建、优化配置及发布流程 |
 | [版本总览](06-delivery/versions/index.md) | 已发布历史与分版本唯一正文 |
