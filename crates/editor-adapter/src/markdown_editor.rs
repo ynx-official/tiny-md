@@ -793,6 +793,11 @@ impl MarkdownEditor {
         self.focus.clone()
     }
 
+    /// Share the document viewport with a host-owned scrollbar.
+    pub fn scroll_handle(&self) -> ScrollHandle {
+        self.scroll.clone()
+    }
+
     /// Toggle presentation without replacing the buffer, selection or history.
     pub fn set_source_mode(&mut self, enabled: bool, cx: &mut Context<Self>) {
         self.finish_composition(cx);

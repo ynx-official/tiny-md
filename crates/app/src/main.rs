@@ -18,6 +18,9 @@ mod assets;
 mod diagram_viewer;
 mod disk_sync;
 mod document_menu;
+mod document_scrollbar;
+#[cfg(test)]
+mod document_scrollbar_tests;
 #[cfg(test)]
 mod editor_style_tests;
 #[cfg(test)]
@@ -269,6 +272,7 @@ struct TinyMd {
     #[cfg(target_os = "windows")]
     menu_bar: Option<(MenuState, Vec<PathBuf>, Entity<WindowsMenuBar>)>,
     editor: Entity<MarkdownEditor>,
+    document_scrollbar: Entity<document_scrollbar::DocumentScrollbar>,
     document: Document,
     _disk_sync_task: Task<()>,
     external_conflict: bool,
@@ -436,6 +440,19 @@ impl TinyMd {
                 .placeholder("从一个想法开始……")
                 .style(editor_style(dark))
         });
+        let scroll = editor.read(cx).scroll_handle();
+        let mut scroll_offset = scroll.offset();
+        let document_scrollbar = cx.new(|_| document_scrollbar::DocumentScrollbar { scroll });
+        cx.observe(&document_scrollbar, move |this, scrollbar, cx| {
+            let offset = scrollbar.read(cx).scroll.offset();
+            if offset != scroll_offset {
+                scroll_offset = offset;
+                // Scrollbar events invalidate their own view. The cached
+                // document also needs to rebuild its visible rows and caret.
+                this.editor.update(cx, |_, cx| cx.notify());
+            }
+        })
+        .detach();
         cx.subscribe(
             &editor,
             |this, _, event: &MarkdownEditorEvent, cx| match event {
@@ -507,6 +524,7 @@ impl TinyMd {
             #[cfg(target_os = "windows")]
             menu_bar: None,
             editor,
+            document_scrollbar,
             document,
             _disk_sync_task: Self::start_disk_sync(window, cx),
             external_conflict: false,
@@ -1272,6 +1290,12 @@ impl Render for TinyMd {
                 );
             }
         }
+        let editor_top = px(if cfg!(target_os = "windows") {
+            16.0
+        } else {
+            32.0
+        });
+        let editor_bottom = px(if self.toolbar { 72.0 } else { 0.0 });
         let body = div()
             .flex()
             .flex_1()
@@ -1291,12 +1315,8 @@ impl Render for TinyMd {
                     } else {
                         32.0
                     }))
-                    .pt(px(if cfg!(target_os = "windows") {
-                        16.0
-                    } else {
-                        32.0
-                    }))
-                    .when(self.toolbar, |body| body.pb(px(72.0)))
+                    .pt(editor_top)
+                    .pb(editor_bottom)
                     .child(
                         div()
                             .w_full()
@@ -1307,6 +1327,17 @@ impl Render for TinyMd {
                             }))
                             .h_full()
                             .child(self.editor.clone()),
+                    )
+                    .child(
+                        div()
+                            .id("document-scrollbar")
+                            .debug_selector(|| "document-scrollbar".into())
+                            .absolute()
+                            .top(editor_top)
+                            .bottom(editor_bottom)
+                            .right_0()
+                            .w(px(16.0))
+                            .child(self.document_scrollbar.clone()),
                     )
                     .when(self.toolbar, |body| {
                         body.child(
