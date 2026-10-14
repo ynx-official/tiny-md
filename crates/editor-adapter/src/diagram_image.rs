@@ -1,4 +1,5 @@
-//! Diagram views own their pixels and bypass GPUI's retain-all asset cache.
+//! Inline previews share bounded CPU pixels; independent viewers own their HD image.
+use crate::diagram_cache::{self, RasterKey};
 use crate::diagrams::{Diagram, RasterSize};
 use gpui::{App, Context, Render, RenderImage, Task, Window, div, img, prelude::*, px};
 use std::{sync::Arc, time::Duration};
@@ -18,7 +19,7 @@ impl DiagramImage {
     pub fn new(diagram: Diagram, cx: &mut Context<Self>) -> Self {
         cx.on_release(|this, cx| {
             if let Some(image) = this.image.take() {
-                cx.drop_image(image, None);
+                diagram_cache::release(cx, image, None);
             }
         })
         .detach();
@@ -55,6 +56,11 @@ impl DiagramImage {
         })
     }
 
+    #[cfg(test)]
+    pub(crate) fn decoded_id(&self) -> Option<gpui::ImageId> {
+        self.image.as_ref().map(|image| image.id)
+    }
+
     /// Stop pending decoding and evict this window's texture before it is destroyed.
     pub fn unload(&mut self, window: &mut Window, cx: &mut App) {
         self.unloaded = true;
@@ -63,7 +69,7 @@ impl DiagramImage {
         self.error = None;
         self.presentation = None;
         if let Some(image) = self.image.take() {
-            cx.drop_image(image, Some(window));
+            diagram_cache::release(cx, image, Some(window));
         }
     }
 
@@ -109,40 +115,80 @@ impl DiagramImage {
         }
         self.requested = Some(requested);
         self.error = None;
+        let cache_key = RasterKey::new(&self.diagram, requested);
+        if !self.high_definition
+            && let Some(image) = diagram_cache::pixels(cx, &cache_key)
+        {
+            self.task = None;
+            self.replace_image(image, cx);
+            cx.notify();
+            return;
+        }
         let diagram = self.diagram.clone();
         let renderer = cx.svg_renderer();
         let executor = cx.background_executor().clone();
         let high_definition = self.high_definition;
         let capacity = crate::diagram_work::raster(cx);
         let ticket = crate::diagram_work::reserve_raster(cx);
+        let request = (!high_definition).then(|| diagram_cache::request_raster(cx, &cache_key));
         self.task = Some(cx.spawn(async move |this, cx| {
             // Inline previews coalesce resizing; the independent viewer skips debounce.
             if !high_definition {
                 executor.timer(Duration::from_millis(100)).await;
             }
             let ticket = ticket.wait().await;
-            // Preview and viewer windows share one decoder, bounding temporary
-            // pixel allocations without blocking the UI or executor threads.
-            let permit = capacity.acquire_arc().await;
-            let (result, _ticket) = executor
-                .spawn(async move {
-                    let _permit = permit;
-                    let result = diagram
-                        .image_at_size(requested)
-                        .to_image_data(renderer)
-                        .map_err(|error| error.to_string());
-                    (result, ticket)
+            let request_permit = if let Some(request) = request {
+                Some(request.acquire().await)
+            } else {
+                None
+            };
+            let Ok(cached) = this.update(cx, |_, cx| {
+                (!high_definition)
+                    .then(|| diagram_cache::pixels(cx, &cache_key))
+                    .flatten()
+            }) else {
+                return;
+            };
+            // Preview, viewer and layout jobs share the five CPU slots, bounding
+            // temporary pixel allocations without blocking the UI threads.
+            let (result, ticket, request_permit) = if let Some(image) = cached {
+                (Ok(image), ticket, request_permit)
+            } else {
+                let permit = capacity.acquire_arc().await;
+                executor
+                    .spawn(async move {
+                        let _permit = permit;
+                        let result = diagram
+                            .image_at_size(requested)
+                            .to_image_data(renderer)
+                            .map_err(|error| error.to_string());
+                        (result, ticket, request_permit)
+                    })
+                    .await
+            };
+            let accepted = this
+                .update(cx, |this, cx| {
+                    if this.unloaded || this.requested != Some(requested) {
+                        return false;
+                    }
+                    if !high_definition && let Ok(image) = &result {
+                        diagram_cache::store_pixels(cx, cache_key, image.clone());
+                    }
+                    true
                 })
-                .await;
+                .unwrap_or(false);
+            drop(request_permit);
+            if !accepted {
+                return;
+            }
+            ticket.publish().await;
             let _ = this.update(cx, |this, cx| {
                 if this.unloaded || this.requested != Some(requested) {
                     return;
                 }
                 match result {
                     Ok(image) => {
-                        if let Some(old) = this.image.replace(image) {
-                            cx.drop_image(old, None);
-                        }
+                        this.replace_image(image, cx);
                     }
                     Err(error) => this.error = Some(error),
                 }
@@ -150,6 +196,20 @@ impl DiagramImage {
                 cx.notify();
             });
         }));
+    }
+
+    fn replace_image(&mut self, image: Arc<RenderImage>, cx: &mut Context<Self>) {
+        if self
+            .image
+            .as_ref()
+            .is_some_and(|old| Arc::ptr_eq(old, &image))
+        {
+            return;
+        }
+        diagram_cache::pin(cx, &image);
+        if let Some(old) = self.image.replace(image) {
+            diagram_cache::release(cx, old, None);
+        }
     }
 }
 
@@ -212,10 +272,68 @@ mod tests {
         cx.run_until_parked();
     }
 
+    #[gpui::test(iterations = 5)]
+    fn diagram_cache_parallel_previews_share_the_same_pixels(cx: &mut TestAppContext) {
+        let diagram = small_diagram();
+        let views = (0..5)
+            .map(|_| {
+                let view = cx.new(|cx| DiagramImage::new(diagram.clone(), cx));
+                view.update(cx, |view, cx| view.set_display_size(300.0, 100.0, 1.0, cx));
+                view
+            })
+            .collect::<Vec<_>>();
+        finish_decoding(cx);
+        cx.read(|cx| {
+            let first = views[0].read(cx).image.as_ref().unwrap();
+            assert!(
+                views.iter().all(|view| {
+                    view.read(cx)
+                        .image
+                        .as_ref()
+                        .is_some_and(|image| Arc::ptr_eq(first, image))
+                }),
+                "simultaneous cache misses must reuse one decoded bitmap"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn diagram_cache_new_previews_reuse_pixels_without_decoder_work(cx: &mut TestAppContext) {
+        let diagram = small_diagram();
+        let first = cx.new(|cx| DiagramImage::new(diagram.clone(), cx));
+        first.update(cx, |image, cx| {
+            image.set_display_size(300.0, 100.0, 1.0, cx)
+        });
+        finish_decoding(cx);
+        let pixels = cx.read(|cx| first.read(cx).image.clone().unwrap());
+        drop(first);
+        cx.update(|_| ());
+        let capacity = cx.update(crate::diagram_work::raster);
+        let _permit = crate::diagram_work::occupy(&capacity);
+        let reopened = cx.new(|cx| DiagramImage::new(diagram, cx));
+        reopened.update(cx, |image, cx| {
+            image.set_display_size(300.0, 100.0, 1.0, cx)
+        });
+        cx.read(|cx| {
+            let reopened = reopened.read(cx);
+            assert!(
+                reopened.task.is_none(),
+                "a cache hit must not schedule decoder work"
+            );
+            assert!(
+                reopened
+                    .image
+                    .as_ref()
+                    .is_some_and(|image| Arc::ptr_eq(&pixels, image)),
+                "reopening must reuse the decoded pixels"
+            );
+        });
+    }
+
     #[gpui::test]
     fn diagram_pixels_wait_for_shared_capacity_and_cancel_obsolete_sizes(cx: &mut TestAppContext) {
         let queue = cx.update(crate::diagram_work::raster);
-        let permit = queue.try_acquire_arc().unwrap();
+        let permit = crate::diagram_work::occupy(&queue);
         let diagram = small_diagram();
         let previews = (0..8)
             .map(|_| {
@@ -262,7 +380,7 @@ mod tests {
             );
         });
         assert!(
-            queue.try_acquire_arc().is_some(),
+            crate::diagram_work::occupy(&queue).len() == crate::diagram_work::MAX_CONCURRENT,
             "all raster capacity must be returned"
         );
     }
@@ -411,7 +529,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn resize_reuses_equal_targets_and_releases_obsolete_pixels(cx: &mut TestAppContext) {
+    fn resize_reuses_cached_targets_and_eviction_releases_idle_pixels(cx: &mut TestAppContext) {
         let view = cx.new(|cx| DiagramImage::new(small_diagram(), cx));
         view.update(cx, |view, cx| view.set_display_size(300.0, 100.0, 1.0, cx));
         finish_decoding(cx);
@@ -422,11 +540,31 @@ mod tests {
         drop(first);
         view.update(cx, |view, cx| view.set_display_size(200.0, 70.0, 2.0, cx));
         finish_decoding(cx);
-        assert!(weak.upgrade().is_none());
-        let weak = cx.read(|cx| Arc::downgrade(view.read(cx).image.as_ref().unwrap()));
+        assert!(
+            weak.upgrade().is_some(),
+            "keep the old target in the bounded cache"
+        );
+        let resized = cx.read(|cx| Arc::downgrade(view.read(cx).image.as_ref().unwrap()));
+        let capacity = cx.update(crate::diagram_work::raster);
+        let _permit = crate::diagram_work::occupy(&capacity);
+        view.update(cx, |view, cx| view.set_display_size(300.0, 100.0, 1.0, cx));
+        cx.read(|cx| {
+            let view = view.read(cx);
+            assert!(
+                view.task.is_none(),
+                "restoring a cached resolution must skip decoding"
+            );
+            assert!(Arc::ptr_eq(
+                &weak.upgrade().unwrap(),
+                view.image.as_ref().unwrap()
+            ));
+        });
         drop(view);
         cx.update(|_| ());
         cx.run_until_parked();
+        assert!(weak.upgrade().is_some());
+        cx.update(crate::diagram_cache::clear_pixels);
         assert!(weak.upgrade().is_none());
+        assert!(resized.upgrade().is_none());
     }
 }

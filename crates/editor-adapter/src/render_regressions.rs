@@ -2,11 +2,203 @@ use super::*;
 use gpui::TestAppContext;
 use gpui::{EntityInputHandler, ScrollDelta, ScrollWheelEvent, size};
 
+#[gpui::test]
+fn diagram_cache_reopening_a_document_reuses_svg_without_layout_work(cx: &mut TestAppContext) {
+    cx.update(|cx| guise::Theme::light().init(cx));
+    let text = std::env::var_os("TINY_MD_DIAGRAM_DOCUMENT")
+        .map(|path| std::fs::read_to_string(path).expect("read diagram document"))
+        .unwrap_or_else(|| "Intro\n\n```mermaid\nflowchart LR\nA --> B\n```\n\n```mermaid\nflowchart LR\nA[unclosed --> B\n```".into());
+    let (editor, cx) = cx.add_window_view(|_, cx| {
+        MarkdownEditor::new(cx)
+            .value(&text)
+            .read_only(true)
+            .style(MarkdownStyle {
+                bare: true,
+                ..Default::default()
+            })
+    });
+    cx.simulate_resize(size(px(1064.0), px(700.0)));
+    for _ in 0..3 {
+        draw(cx);
+        cx.background_executor
+            .advance_clock(std::time::Duration::from_millis(1000));
+    }
+    draw(cx);
+    let originals = cx.read(|cx| {
+        let editor = editor.read(cx);
+        editor
+            .document_cache
+            .current()
+            .unwrap()
+            .code
+            .iter()
+            .filter(|block| block.is_mermaid())
+            .map(|block| {
+                let key = DiagramKey {
+                    source: block.source.clone(),
+                    dark: false,
+                };
+                let state = match &editor.diagrams[&key] {
+                    DiagramState::Ready(diagram) => Ok(diagram.image.clone()),
+                    DiagramState::Error(error) => Err(error.clone()),
+                    _ => panic!("initial diagrams must finish"),
+                };
+                (
+                    key,
+                    state,
+                    editor.diagram_views[&block.start].preview_id(cx),
+                )
+            })
+            .collect::<Vec<_>>()
+    });
+    let capacity = cx.update(|_, cx| crate::diagram_work::layout(cx));
+    let _permit = crate::diagram_work::occupy(&capacity);
+    let raster_capacity = cx.update(|_, cx| crate::diagram_work::raster(cx));
+    let _raster_permit = crate::diagram_work::occupy(&raster_capacity);
+    editor.update(cx, |editor, cx| editor.set_text("Another document", cx));
+    draw(cx);
+    editor.update(cx, |editor, cx| editor.set_text(&text, cx));
+    draw(cx);
+    draw(cx);
+    cx.read(|cx| {
+        let editor = editor.read(cx);
+        let blocks = editor.document_cache.current().unwrap();
+        for ((key, original, image_id), block) in originals.iter().zip(blocks.code.iter().filter(|block| block.is_mermaid())) {
+            match (original, &editor.diagrams[key]) {
+                (Ok(original), DiagramState::Ready(diagram)) => {
+                    assert!(std::sync::Arc::ptr_eq(original, &diagram.image));
+                    assert!(image_id.is_some(), "initial valid diagrams must have pixels");
+                    assert_eq!(editor.diagram_views[&block.start].preview_id(cx), *image_id, "warm reopening must reuse every bitmap while decoder capacity is occupied");
+                }
+                (Err(original), DiagramState::Error(error)) => assert_eq!(original, error),
+                _ => panic!("reopening unchanged source must hit memory immediately"),
+            }
+        }
+        println!("memory_cache_reopen: diagrams={} bitmaps={} background_layout_and_raster_capacity_occupied=true", originals.len(), originals.iter().filter(|(_, state, _)| state.is_ok()).count());
+        assert_eq!(editor.text(), text);
+    });
+}
+
+#[gpui::test]
+fn diagram_cache_text_edits_only_rerender_changed_sources_and_theme_roundtrips_reuse_svg(
+    cx: &mut TestAppContext,
+) {
+    cx.update(|cx| guise::Theme::light().init(cx));
+    let text =
+        "Intro\n\n```mermaid\nflowchart LR\nA --> B\n```\n\n```mermaid\nflowchart TD\nC --> D\n```";
+    let sources = ["flowchart LR\nA --> B", "flowchart TD\nC --> D"];
+    let (editor, cx) =
+        cx.add_window_view(|_, cx| MarkdownEditor::new(cx).value(text).read_only(true));
+    for _ in 0..3 {
+        draw(cx);
+        cx.background_executor
+            .advance_clock(std::time::Duration::from_millis(1000));
+    }
+    draw(cx);
+    let originals = cx.read(|cx| {
+        sources.map(|source| {
+            let key = DiagramKey {
+                source: source.into(),
+                dark: false,
+            };
+            let DiagramState::Ready(diagram) = &editor.read(cx).diagrams[&key] else {
+                panic!("initial diagram")
+            };
+            diagram.image.clone()
+        })
+    });
+    let capacity = cx.update(|_, cx| crate::diagram_work::layout(cx));
+    let permit = crate::diagram_work::occupy(&capacity);
+    editor.update(cx, |editor, cx| {
+        editor.apply_external_text(&text.replace("Intro", "Edited prose"), cx)
+    });
+    draw(cx);
+    cx.read(|cx| {
+        for (index, source) in sources.iter().enumerate() {
+            let key = DiagramKey {
+                source: (*source).into(),
+                dark: false,
+            };
+            let DiagramState::Ready(diagram) = &editor.read(cx).diagrams[&key] else {
+                panic!("prose must reuse diagram")
+            };
+            assert!(std::sync::Arc::ptr_eq(&originals[index], &diagram.image));
+        }
+    });
+    let edited = text.replace("A --> B", "A --> Changed");
+    editor.update(cx, |editor, cx| editor.apply_external_text(&edited, cx));
+    draw(cx);
+    cx.read(|cx| {
+        let editor = editor.read(cx);
+        let unchanged = DiagramKey {
+            source: sources[1].into(),
+            dark: false,
+        };
+        let DiagramState::Ready(diagram) = &editor.diagrams[&unchanged] else {
+            panic!("other graph must stay ready")
+        };
+        assert!(std::sync::Arc::ptr_eq(&originals[1], &diagram.image));
+        assert!(matches!(
+            editor.diagrams[&DiagramKey {
+                source: "flowchart LR\nA --> Changed".into(),
+                dark: false
+            }],
+            DiagramState::Loading { .. }
+        ));
+    });
+    drop(permit);
+    for _ in 0..3 {
+        cx.background_executor
+            .advance_clock(std::time::Duration::from_millis(1000));
+        draw(cx);
+    }
+    cx.update(|_, cx| guise::Theme::dark().init(cx));
+    editor.update(cx, |_, cx| cx.notify());
+    for _ in 0..3 {
+        draw(cx);
+        cx.background_executor
+            .advance_clock(std::time::Duration::from_millis(1000));
+    }
+    cx.read(|cx| {
+        let dark_key = DiagramKey {
+            source: sources[1].into(),
+            dark: true,
+        };
+        let DiagramState::Ready(diagram) = &editor.read(cx).diagrams[&dark_key] else {
+            panic!("dark diagram")
+        };
+        assert_ne!(
+            diagram.image.bytes(),
+            originals[1].bytes(),
+            "themes must use separate cache entries"
+        );
+    });
+    let _permit = crate::diagram_work::occupy(&capacity);
+    cx.update(|_, cx| guise::Theme::light().init(cx));
+    editor.update(cx, |editor, cx| {
+        editor.apply_external_text(text, cx);
+        cx.notify();
+    });
+    draw(cx);
+    cx.read(|cx| {
+        for (index, source) in sources.iter().enumerate() {
+            let key = DiagramKey {
+                source: (*source).into(),
+                dark: false,
+            };
+            let DiagramState::Ready(diagram) = &editor.read(cx).diagrams[&key] else {
+                panic!("theme and undo must reuse the cached SVG")
+            };
+            assert!(std::sync::Arc::ptr_eq(&originals[index], &diagram.image));
+        }
+    });
+}
+
 #[gpui::test(iterations = 10)]
 fn diagram_open_order_follows_the_document(cx: &mut TestAppContext) {
     cx.update(|cx| guise::Theme::light().init(cx));
     let capacity = cx.update(crate::diagram_work::layout);
-    let permit = capacity.try_acquire_arc().unwrap();
+    let permit = crate::diagram_work::occupy(&capacity);
     let sources = (0..8)
         .map(|i| format!("flowchart LR\nA{i} --> B{i}"))
         .collect::<Vec<_>>();
@@ -60,8 +252,15 @@ fn diagram_open_order_follows_the_document(cx: &mut TestAppContext) {
 #[gpui::test]
 fn diagram_open_keeps_later_cached_duplicates_behind_pending_diagrams(cx: &mut TestAppContext) {
     cx.update(|cx| guise::Theme::light().init(cx));
-    let capacity = cx.update(crate::diagram_work::layout);
-    let permit = capacity.try_acquire_arc().unwrap();
+    // Hold only the missing layout so the cached first SVG can still decode
+    // using the shared CPU slots.
+    let pending = DiagramKey {
+        source: "flowchart TD\nC --> D".into(),
+        dark: false,
+    };
+    let permit = cx
+        .update(|cx| crate::diagram_cache::request_layout(cx, &pending))
+        .try_acquire();
     let first = "flowchart LR\nA --> B";
     let key = DiagramKey {
         source: first.into(),
@@ -110,11 +309,46 @@ fn diagram_open_keeps_later_cached_duplicates_behind_pending_diagrams(cx: &mut T
     }));
 }
 
+#[gpui::test(iterations = 5)]
+fn diagram_cache_parallel_documents_share_the_same_layout(cx: &mut TestAppContext) {
+    cx.update(|cx| guise::Theme::light().init(cx));
+    let key = DiagramKey {
+        source: "flowchart LR\nA[Shared] --> B[Layout]".into(),
+        dark: false,
+    };
+    let text = format!("```mermaid\n{}\n```", key.source);
+    let editors = (0..5)
+        .map(|_| {
+            let (editor, visual) = cx.add_window_view(|_, cx| MarkdownEditor::new(cx).value(&text));
+            draw(visual);
+            editor
+        })
+        .collect::<Vec<_>>();
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(181));
+    cx.run_until_parked();
+    cx.read(|cx| {
+        let images = editors
+            .iter()
+            .map(|editor| match editor.read(cx).diagrams.get(&key) {
+                Some(DiagramState::Ready(diagram)) => diagram.image.clone(),
+                _ => panic!("every parallel document must finish its layout"),
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            images
+                .iter()
+                .all(|image| std::sync::Arc::ptr_eq(&images[0], image)),
+            "simultaneous cache misses must reuse one generated SVG"
+        );
+    });
+}
+
 #[gpui::test]
 fn diagram_open_skeleton_and_height_changes_keep_the_reading_anchor(cx: &mut TestAppContext) {
     cx.update(|cx| guise::Theme::light().init(cx));
     let capacity = cx.update(crate::diagram_work::layout);
-    let permit = capacity.try_acquire_arc().unwrap();
+    let permit = crate::diagram_work::occupy(&capacity);
     let source = format!(
         "flowchart TD\n{}",
         (0..10)
@@ -179,7 +413,7 @@ fn diagram_open_skeleton_and_height_changes_keep_the_reading_anchor(cx: &mut Tes
 fn diagram_layout_waits_for_capacity_and_cancels_replaced_documents(cx: &mut TestAppContext) {
     cx.update(|cx| guise::Theme::light().init(cx));
     let queue = cx.update(crate::diagram_work::layout);
-    let permit = queue.try_acquire_arc().unwrap();
+    let permit = crate::diagram_work::occupy(&queue);
     let old_text = (0..12)
         .map(|i| format!("```mermaid\nflowchart LR\nA{i} --> B{i}\n```\n\n"))
         .collect::<String>();
@@ -236,7 +470,7 @@ fn diagram_layout_waits_for_capacity_and_cancels_replaced_documents(cx: &mut Tes
         );
     });
     assert!(
-        queue.try_acquire_arc().is_some(),
+        crate::diagram_work::occupy(&queue).len() == crate::diagram_work::MAX_CONCURRENT,
         "cancellation must release capacity"
     );
 }

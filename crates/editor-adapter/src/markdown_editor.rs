@@ -1941,27 +1941,61 @@ impl MarkdownEditor {
             if self.diagrams.contains_key(key) {
                 continue;
             }
+            if let Some(result) = crate::diagram_cache::layout(cx, key) {
+                self.diagrams.insert(
+                    key.clone(),
+                    match result {
+                        Ok(diagram) => DiagramState::Ready(diagram),
+                        Err(error) => DiagramState::Error(error),
+                    },
+                );
+                continue;
+            }
             let key = key.clone();
             let cache_key = key.clone();
             let task_key = key.clone();
             let executor = cx.background_executor().clone();
             let capacity = crate::diagram_work::layout(cx);
             let ticket = crate::diagram_work::reserve_layout(cx);
+            let request = crate::diagram_cache::request_layout(cx, &key);
             let task = cx.spawn(async move |this, cx| {
                 executor.timer(std::time::Duration::from_millis(180)).await;
                 let ticket = ticket.wait().await;
+                let request_permit = request.acquire().await;
+                // Another document may have filled the shared cache while this
+                // request waited in FIFO order. Recheck before doing CPU work.
+                let Ok(cached) =
+                    this.update(cx, |_, cx| crate::diagram_cache::layout(cx, &task_key))
+                else {
+                    return;
+                };
                 // Waiting tasks use no worker thread. Keep the permit inside the
                 // worker so cancellation cannot overlap a still-running layout.
-                let permit = capacity.acquire_arc().await;
-                let (result, _ticket) = executor
-                    .spawn(async move {
-                        let _permit = permit;
-                        (diagrams::render(&task_key), ticket)
-                    })
-                    .await;
+                let (result, ticket, request_permit) = if let Some(result) = cached {
+                    (result, ticket, request_permit)
+                } else {
+                    let permit = capacity.acquire_arc().await;
+                    executor
+                        .spawn(async move {
+                            let _permit = permit;
+                            (diagrams::render(&task_key), ticket, request_permit)
+                        })
+                        .await
+                };
+                // Make the memoized result available before waiting to display
+                // it. Otherwise a later job holding the same key can deadlock
+                // an earlier job that must publish first.
+                let stored = this.update(cx, |_, cx| {
+                    crate::diagram_cache::store_layout(cx, &key, &result)
+                });
+                drop(request_permit);
+                if stored.is_err() {
+                    return;
+                }
+                ticket.publish().await;
                 let _ = this.update(cx, |this, cx| {
                     if let std::collections::hash_map::Entry::Occupied(mut entry) =
-                        this.diagrams.entry(key)
+                        this.diagrams.entry(key.clone())
                     {
                         entry.insert(match result {
                             Ok(diagram) => DiagramState::Ready(diagram),

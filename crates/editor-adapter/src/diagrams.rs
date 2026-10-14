@@ -87,6 +87,13 @@ impl DiagramView {
     }
 
     #[cfg(test)]
+    pub(crate) fn preview_id(&self, cx: &App) -> Option<gpui::ImageId> {
+        self.preview
+            .as_ref()
+            .and_then(|preview| preview.read(cx).decoded_id())
+    }
+
+    #[cfg(test)]
     pub(crate) fn preview_size(&self, cx: &App) -> Option<RasterSize> {
         self.preview
             .as_ref()
@@ -209,7 +216,7 @@ fn replace_root_attribute(root: &str, name: &str, value: u32) -> String {
     format!("{}{value}{}", &root[..start], &root[end..])
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct RasterSize {
     pub width: u32,
     pub height: u32,
@@ -335,6 +342,128 @@ pub fn render(key: &DiagramKey) -> Result<Diagram, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Opt-in measurement of the real layout and GPUI SVG decode paths. Timings
+    /// are diagnostic output, not wall-clock assertions or native-window FPS.
+    #[gpui::test]
+    #[ignore = "set TINY_MD_DIAGRAM_DOCUMENT to profile a local document"]
+    fn profile_diagram_generation(cx: &mut gpui::TestAppContext) {
+        let path =
+            std::env::var_os("TINY_MD_DIAGRAM_DOCUMENT").expect("set TINY_MD_DIAGRAM_DOCUMENT");
+        let text = std::fs::read_to_string(path).expect("read profile document");
+        let lines = text.lines().map(str::to_owned).collect::<Vec<_>>();
+        let (blocks, _) = crate::code_blocks::collect(&lines);
+        let limit = std::env::var("TINY_MD_DIAGRAM_PROFILE_LIMIT")
+            .ok()
+            .map(|value| value.parse::<usize>().expect("positive profile limit"))
+            .unwrap_or(usize::MAX);
+        let workers = std::env::var("TINY_MD_DIAGRAM_PROFILE_WORKERS")
+            .ok()
+            .map(|value| value.parse::<usize>().expect("worker count"))
+            .unwrap_or(1);
+        assert!((1..=crate::diagram_work::MAX_CONCURRENT).contains(&workers));
+        let blocks = blocks
+            .into_iter()
+            .filter(|block| block.is_mermaid())
+            .take(limit)
+            .collect::<Vec<_>>();
+        let renderer = cx.update(|cx| cx.svg_renderer());
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let started = std::time::Instant::now();
+        let totals = std::thread::scope(|scope| {
+            let mut tasks = Vec::new();
+            for _ in 0..workers {
+                let (blocks, next, renderer) = (&blocks, &next, renderer.clone());
+                tasks.push(scope.spawn(move || {
+                    let mut totals = (0.0, 0.0, 0usize, 0, 0);
+                    loop {
+                        let index = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let Some(block) = blocks.get(index) else {
+                            break;
+                        };
+                        let result = profile_one_diagram(block, index, |diagram, size| {
+                            diagram
+                                .image_at_size(size)
+                                .to_image_data(renderer.clone())
+                                .map_err(|error| error.to_string())
+                        });
+                        totals.0 += result.0;
+                        totals.1 += result.1;
+                        totals.2 += result.2;
+                        totals.3 += result.3;
+                        totals.4 += result.4;
+                    }
+                    totals
+                }));
+            }
+            tasks
+                .into_iter()
+                .fold((0.0, 0.0, 0usize, 0, 0), |mut total, task| {
+                    let result = task.join().expect("diagram profiling worker");
+                    total.0 += result.0;
+                    total.1 += result.1;
+                    total.2 += result.2;
+                    total.3 += result.3;
+                    total.4 += result.4;
+                    total
+                })
+        });
+        let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+        let (layout_ms, pixels_ms, bytes, ready, errors) = totals;
+        println!(
+            "diagram_profile_summary workers={workers} elapsed_ms={elapsed_ms:.3} ready={ready} errors={errors} layout_ms={layout_ms:.3} pixels_ms={pixels_ms:.3} pixel_mib={:.2} debug_assertions={}",
+            bytes as f64 / (1024.0 * 1024.0),
+            cfg!(debug_assertions)
+        );
+        assert!(ready > 0, "profile document must contain a valid diagram");
+    }
+
+    fn profile_one_diagram(
+        block: &crate::code_blocks::CodeBlock,
+        index: usize,
+        // GPUI exposes decoding but does not export its renderer type.
+        decode: impl FnOnce(&Diagram, RasterSize) -> Result<Arc<gpui::RenderImage>, String>,
+    ) -> (f64, f64, usize, usize, usize) {
+        let started = std::time::Instant::now();
+        let result = render(&DiagramKey {
+            source: block.source.clone(),
+            dark: false,
+        });
+        let layout = started.elapsed().as_secs_f64() * 1000.0;
+        let diagram = match result {
+            Ok(diagram) => diagram,
+            Err(_) => {
+                println!(
+                    "diagram_profile index={} layout_ms={layout:.3} error=true",
+                    index + 1
+                );
+                return (layout, 0.0, 0, 0, 1);
+            }
+        };
+        // Repeat only parsing after the real cold generation to locate
+        // parser cost without warming its caches before that measurement.
+        let started = std::time::Instant::now();
+        let parsed = parse_mermaid_strict(&block.source).expect("already rendered source");
+        let parse_repeat_ms = started.elapsed().as_secs_f64() * 1000.0;
+        println!(
+            "diagram_parse_probe index={} parse_repeat_ms={parse_repeat_ms:.3} nodes={} edges={}",
+            index + 1,
+            parsed.graph.nodes.len(),
+            parsed.graph.edges.len()
+        );
+        let (width, height) = diagram.display_size(1000.0, None);
+        let size = RasterSize::for_display(width, height, 2.0);
+        let started = std::time::Instant::now();
+        let image = decode(&diagram, size).expect("decode profile diagram");
+        let pixels = started.elapsed().as_secs_f64() * 1000.0;
+        println!(
+            "diagram_profile index={} layout_ms={layout:.3} pixels_ms={pixels:.3} pixels={}x{}",
+            index + 1,
+            size.width,
+            size.height
+        );
+        (layout, pixels, image.as_bytes(0).unwrap().len(), 1, 0)
+    }
 
     #[test]
     fn generated_svg_does_not_preallocate_a_three_times_larger_canvas() {

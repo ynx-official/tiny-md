@@ -1,7 +1,7 @@
 # Windows 开发与适配
 
 - 状态：Review
-- 最后更新：2026-10-09
+- 最后更新：2026-10-14
 - 关联文档：[文档索引](../README.md)、[验证记录](../verification.md)、[版本构建](../releases.md)
 
 ## 平台与环境
@@ -30,6 +30,10 @@ Windows 10 兼容性尚待实际运行验收。
 `check.ps1` 依次执行格式检查、工作区测试和 Clippy；任一步失败均终止。
 
 编译后的开发程序为 `target/debug/tiny-md.exe`，Windows GUI 子系统避免双击时出现控制台。
+2026-10-14 起，普通 `cargo run` / 开发启动会对 Mermaid、SVG 光栅化与字体处理依赖使用 `opt-level = 2`，
+工作区代码保留开发调试配置。第一次切换该配置会重新编译相关依赖；已启动的旧进程不会自动更新。
+发行版性能对照使用上面的 `-Release` 命令。分段测量与当前验证范围见
+[流程图加载性能](../04-quality/diagram-load-performance.md)。
 发行安装程序仍由 `scripts/bundle-windows.ps1` 构建，需要额外安装 Inno Setup 6；
 系统尚未安装 Inno Setup 6；后续文件集成改动使用工作区内的便携编译器生成开发安装包，
 验证范围见 [拖放与 Windows 文件集成](windows-shell-integration.md)。此前的便携优化版曾更新当前用户已有安装目录。

@@ -7,6 +7,7 @@ mod caret;
 mod chord;
 mod code_blocks;
 mod commands;
+mod diagram_cache;
 mod diagram_image;
 mod diagram_work;
 mod diagrams;

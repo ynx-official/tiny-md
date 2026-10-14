@@ -20,6 +20,30 @@ tiny-md-updater = { path = "crates/updater" }
 [profile.dev]
 debug = 1
 
+# Diagram layout, font shaping and SVG rasterization are CPU-heavy even in
+# development. Optimize these dependencies so `cargo run` stays usable with
+# large diagrams while keeping workspace code quick to rebuild and debug.
+[profile.dev.package.mermaid-rs-renderer]
+opt-level = 2
+
+[profile.dev.package.resvg]
+opt-level = 2
+
+[profile.dev.package.usvg]
+opt-level = 2
+
+[profile.dev.package.tiny-skia]
+opt-level = 2
+
+[profile.dev.package.fontdb]
+opt-level = 2
+
+[profile.dev.package.rustybuzz]
+opt-level = 2
+
+[profile.dev.package.ttf-parser]
+opt-level = 2
+
 [profile.release]
 opt-level = 3
 lto = "fat"
