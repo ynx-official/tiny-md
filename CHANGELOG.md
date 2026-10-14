@@ -5,7 +5,7 @@
 
 ## [Unreleased]
 
-## [0.2.8] - 2026-10-14
+## [0.2.9] - 2026-10-14
 
 ### 改进
 
@@ -121,7 +121,7 @@
 - 首次提供 macOS Apple Silicon DMG 和 Windows x64 安装包。
 - 原生 Markdown 写作窗口与基本文档操作。
 
-[0.2.8]: docs/06-delivery/versions/v0.2.8.md
+[0.2.9]: docs/06-delivery/versions/v0.2.9.md
 [0.2.7]: docs/06-delivery/versions/v0.2.7.md
 [0.2.6]: docs/06-delivery/versions/v0.2.6.md
 [0.2.5]: docs/06-delivery/versions/v0.2.5.md

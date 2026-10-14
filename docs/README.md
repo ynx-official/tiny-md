@@ -30,7 +30,8 @@
 | [开发路线](roadmap.md) | 现有功能与后续范围 |
 | [版本构建](releases.md) | macOS 与 Windows 安装包构建、优化配置及发布流程 |
 | [版本总览](06-delivery/versions/index.md) | 已发布历史与分版本唯一正文 |
-| [v0.2.8 版本详情](06-delivery/versions/v0.2.8.md) | ELK 与流程图加载优化、Mermaid 兼容修复及本次跳过测试的发布记录 |
+| [v0.2.9 版本详情](06-delivery/versions/v0.2.9.md) | ELK 与流程图加载优化、Mermaid 兼容修复及本次跳过测试的发布记录 |
+| [v0.2.8 未发布记录](99-archive/v0.2.8-failed-release.md) | CI Clippy 失败、未公开 Release 与替代版本 |
 | [v0.2.7 版本详情](06-delivery/versions/v0.2.7.md) | 双平台段落空行修复与本次跳过测试的发布记录 |
 | [v0.2.6 版本详情](06-delivery/versions/v0.2.6.md) | Windows 段落空行间距修复与本次跳过测试的发布记录 |
 | [v0.2.5 版本详情](06-delivery/versions/v0.2.5.md) | 侧栏当前窗口切换与简洁更新日志的发布记录 |
