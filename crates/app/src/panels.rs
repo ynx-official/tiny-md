@@ -16,7 +16,35 @@ impl TinyMd {
     pub(crate) fn show_sidebar(&mut self, mode: SidebarMode, cx: &mut Context<Self>) {
         self.sidebar = true;
         self.sidebar_mode = mode;
+        if mode == SidebarMode::Tree {
+            self.reset_sidebar_navigation();
+        } else if mode == SidebarMode::Documents {
+            self.sidebar_reveal[mode as usize] = true;
+        }
         cx.notify();
+    }
+
+    pub(crate) fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
+        if self.sidebar {
+            self.sidebar = false;
+            cx.notify();
+        } else {
+            self.show_sidebar(self.sidebar_mode, cx);
+        }
+    }
+
+    pub(crate) fn reset_sidebar_navigation(&mut self) {
+        let current = self.document.path();
+        self.collapsed_folders = self
+            .documents
+            .iter()
+            .filter(|entry| entry.is_dir)
+            .map(|entry| &entry.path)
+            .chain(self.library_root.iter())
+            .filter(|folder| current.is_none_or(|path| !path.starts_with(folder)))
+            .cloned()
+            .collect();
+        self.sidebar_reveal = [true; 2];
     }
 
     pub(crate) fn refresh_documents(&mut self, cx: &mut Context<Self>) {
@@ -42,6 +70,7 @@ impl TinyMd {
                             entry.preview = library::summary(&this.editor.read(cx).text());
                         }
                         this.documents = entries;
+                        this.reset_sidebar_navigation();
                         this.library_error = None;
                     }
                     Err(error) => this.library_error = Some(format!("无法读取文件夹：{error}")),
@@ -139,7 +168,11 @@ impl TinyMd {
         .detach();
     }
 
-    pub(crate) fn sidebar_panel(&self, window: &Window, cx: &mut Context<Self>) -> Stateful<Div> {
+    pub(crate) fn sidebar_panel(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
         let background = rgb(if self.dark { 0x1e2024 } else { 0xf9f9f9 });
         let ink = rgb(if self.dark { 0xe4e6e9 } else { 0x4b4b4b });
         let muted = rgb(if self.dark { 0x989ea7 } else { 0x999999 });
@@ -215,11 +248,6 @@ impl TinyMd {
             let query = self.library_query.read(cx).value();
             let mut entries = self.documents.clone();
             if let Some(path) = self.document.path()
-                && (!tree
-                    || self
-                        .library_root
-                        .as_ref()
-                        .is_none_or(|root| path.starts_with(root)))
                 && !entries.iter().any(|entry| entry.path == path)
             {
                 entries.insert(
@@ -289,6 +317,41 @@ impl TinyMd {
                         .unwrap_or_default()
                         .to_ascii_lowercase()
                 });
+            }
+            if self.sidebar && !self.focus_mode && self.sidebar_reveal[mode_index] {
+                let current = self.document.path();
+                let index = if current.is_none() {
+                    Some(0)
+                } else {
+                    visible
+                        .iter()
+                        .position(|entry| Some(entry.path.as_path()) == current)
+                };
+                if let Some(index) = index {
+                    // ScrollHandle uses the previous frame's viewport. Wait until
+                    // this mode and its loaded rows have established their bounds.
+                    let scroll = scroll.clone();
+                    let view = cx.weak_entity();
+                    let mode = self.sidebar_mode;
+                    let request = self.library_request;
+                    let current = current.map(Path::to_path_buf);
+                    let query = query.clone();
+                    window.defer(cx, move |_, cx| {
+                        let _ = view.update(cx, |this, cx| {
+                            if this.sidebar
+                                && !this.focus_mode
+                                && this.sidebar_mode == mode
+                                && this.library_request == request
+                                && this.document.path() == current.as_deref()
+                                && this.library_query.read(cx).value() == query
+                            {
+                                scroll.scroll_to_item(index);
+                                cx.notify();
+                            }
+                        });
+                    });
+                    self.sidebar_reveal[mode_index] = false;
+                }
             }
             if visible.is_empty() && (!query.trim().is_empty() || self.document.path().is_some()) {
                 list = list.child(div().px_4().py_3().text_sm().text_color(muted).child(

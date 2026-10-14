@@ -65,6 +65,12 @@ const PAD_X: f32 = 16.0;
 const PAD_Y: f32 = 12.0;
 /// Wrap width used before the first layout pass has measured the content.
 const DEFAULT_WRAP: f32 = 640.0;
+
+enum ScrollRequest {
+    RevealCursor,
+    LineStart,
+}
+
 gpui::actions!(tiny_md_editor, [EditorTab, EditorTabPrevious]);
 struct EditorKeyBindings;
 impl gpui::Global for EditorKeyBindings {}
@@ -574,8 +580,8 @@ pub struct MarkdownEditor {
     table_signatures: Vec<u64>,
     table_wrap: f32,
     work: RenderWork,
-    /// Bring the caret into view on the next render.
-    scroll_to_cursor: bool,
+    /// Apply navigation after rebuilding the current line geometry.
+    scroll_request: Option<ScrollRequest>,
     /// Sticky x (content space) for visual-row vertical movement.
     goal_x: Option<f32>,
     diagrams: std::collections::HashMap<DiagramKey, DiagramState>,
@@ -656,7 +662,7 @@ impl MarkdownEditor {
             table_signatures: Vec::new(),
             table_wrap: 0.0,
             work: RenderWork::default(),
-            scroll_to_cursor: false,
+            scroll_request: None,
             goal_x: None,
             diagrams: std::collections::HashMap::new(),
             diagram_views: std::collections::HashMap::new(),
@@ -781,7 +787,7 @@ impl MarkdownEditor {
         self.layout.clear();
         self.normalize_heading_cursor();
         self.scroll.set_offset(point(px(0.0), px(0.0)));
-        self.scroll_to_cursor = true;
+        self.scroll_request = Some(ScrollRequest::RevealCursor);
         self.goal_x = None;
         cx.notify();
     }
@@ -813,6 +819,14 @@ impl MarkdownEditor {
         self.scroll.clone()
     }
 
+    /// Navigate to a source line and align its start near the viewport top.
+    /// The next render uses fresh geometry and clamps at the document end.
+    pub fn jump_to_line(&mut self, line: usize, cx: &mut Context<Self>) {
+        self.edit(cx, |model| model.move_to(line, 0, false));
+        self.goal_x = None;
+        self.scroll_request = Some(ScrollRequest::LineStart);
+    }
+
     /// Hosts report scrollbar thumb dragging so diagram sizes remain stable.
     pub fn scrollbar_drag_state(&self) -> Rc<Cell<bool>> {
         self.diagram_scrollbar_dragging.clone()
@@ -823,7 +837,7 @@ impl MarkdownEditor {
         self.finish_composition(cx);
         self.source_mode = enabled;
         self.normalize_heading_cursor();
-        self.scroll_to_cursor = true;
+        self.scroll_request = Some(ScrollRequest::RevealCursor);
         cx.notify();
     }
 
@@ -846,14 +860,14 @@ impl MarkdownEditor {
 
     pub fn set_font_size(&mut self, size: f32, cx: &mut Context<Self>) {
         self.font_size = size.clamp(12.0, 30.0);
-        self.scroll_to_cursor = true;
+        self.scroll_request = Some(ScrollRequest::RevealCursor);
         cx.notify();
     }
 
     pub fn set_writing_modes(&mut self, focus: bool, typewriter: bool, cx: &mut Context<Self>) {
         self.focus_mode = focus;
         self.typewriter = typewriter;
-        self.scroll_to_cursor = true;
+        self.scroll_request = Some(ScrollRequest::RevealCursor);
         cx.notify();
     }
 
@@ -983,7 +997,7 @@ impl MarkdownEditor {
         if after != before {
             cx.emit(MarkdownEditorEvent::Change(after));
         }
-        self.scroll_to_cursor = true;
+        self.scroll_request = Some(ScrollRequest::RevealCursor);
         cx.notify();
         result
     }
@@ -1054,7 +1068,7 @@ impl MarkdownEditor {
         });
         // The caret may be far outside the manually scrolled viewport. This
         // in-place action must not follow it as ordinary typing does.
-        self.scroll_to_cursor = false;
+        self.scroll_request = None;
         true
     }
 
@@ -1598,7 +1612,7 @@ impl MarkdownEditor {
         let (line, col) = self.hit(x, y);
         self.model.move_to(line, col, true);
         self.caret.reset();
-        self.scroll_to_cursor = true;
+        self.scroll_request = Some(ScrollRequest::RevealCursor);
         cx.notify();
     }
 
@@ -1692,7 +1706,7 @@ impl MarkdownEditor {
     fn after_edit(&mut self, cx: &mut Context<Self>) {
         self.caret.reset();
         cx.emit(MarkdownEditorEvent::Change(self.model.text()));
-        self.scroll_to_cursor = true;
+        self.scroll_request = Some(ScrollRequest::RevealCursor);
         cx.notify();
         cx.stop_propagation();
     }
@@ -1700,7 +1714,7 @@ impl MarkdownEditor {
     fn after_move(&mut self, cx: &mut Context<Self>) {
         self.caret.reset();
         self.normalize_heading_cursor();
-        self.scroll_to_cursor = true;
+        self.scroll_request = Some(ScrollRequest::RevealCursor);
         cx.notify();
         cx.stop_propagation();
     }
@@ -1745,6 +1759,26 @@ impl MarkdownEditor {
         if y != f32::from(offset.y) {
             self.scroll.set_offset(point(offset.x, px(y)));
         }
+    }
+
+    fn align_cursor_line_at_top(&mut self) {
+        let Some(row) = self.layout.get(self.model.cursor().line) else {
+            return;
+        };
+        let view_h = f32::from(self.scroll.bounds().size.height);
+        if view_h <= 0.0 {
+            return;
+        }
+        let padding = if self.typewriter {
+            view_h * 0.45
+        } else {
+            PAD_Y
+        };
+        // Cancel the document/typewriter padding for later chapters, retaining
+        // the usual small reading inset. GPUI clamps to the fresh content size.
+        let y = (PAD_Y - padding - row.y.get()).min(0.0);
+        let offset = self.scroll.offset();
+        self.scroll.set_offset(point(offset.x, px(y)));
     }
 }
 
@@ -1839,15 +1873,15 @@ impl MarkdownEditor {
         let diagram_anchor = (self.diagram_geometry_dirty
             && !changed
             && !self.source_mode
-            && !self.scroll_to_cursor)
-            .then(|| {
-                self.layout
-                    .iter()
-                    .enumerate()
-                    .find(|(_, row)| row.height > 0.0 && row.y.get() + row.height > top)
-                    .map(|(line, row)| (line, row.y.get()))
-            })
-            .flatten();
+            && self.scroll_request.is_none())
+        .then(|| {
+            self.layout
+                .iter()
+                .enumerate()
+                .find(|(_, row)| row.height > 0.0 && row.y.get() + row.height > top)
+                .map(|(line, row)| (line, row.y.get()))
+        })
+        .flatten();
         self.diagram_geometry_dirty = false;
         if changed {
             self.work.parsed_documents += 1;
@@ -2453,9 +2487,11 @@ impl MarkdownEditor {
                 scroll_offset.y - px(row.y.get() - previous_y),
             ));
         }
-        if self.scroll_to_cursor {
-            self.scroll_to_cursor = false;
-            self.ensure_cursor_visible();
+        if let Some(request) = self.scroll_request.take() {
+            match request {
+                ScrollRequest::RevealCursor => self.ensure_cursor_visible(),
+                ScrollRequest::LineStart => self.align_cursor_line_at_top(),
+            }
         }
 
         // build elements

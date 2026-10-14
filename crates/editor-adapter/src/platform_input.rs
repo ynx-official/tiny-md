@@ -73,7 +73,7 @@ impl EntityInputHandler for MarkdownEditor {
         }
         self.ime.update(&mut self.model, range, text, selected);
         self.caret.reset();
-        self.scroll_to_cursor = true;
+        self.scroll_request = Some(ScrollRequest::RevealCursor);
         cx.notify(); // Provisional input must not emit a document Change.
     }
 

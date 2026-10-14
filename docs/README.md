@@ -10,7 +10,7 @@
 | [偏好设置与更新窗口](02-design/preferences.md) | 文件菜单入口、分类设置、主题持久化、后台下载和更新窗口重新排版 |
 | [应用图标](02-design/application-icons.md) | Windows 留白与 DPI 尺寸、macOS 独立素材、导出及资源核对 |
 | [外部文件同步](02-design/external-file-sync.md) | 自动同步、三方合并、冲突处理与撤销保护 |
-| [文档窗口](02-design/document-windows.md) | 侧栏当前窗口切换、空白未命名窗口复用与草稿保护 |
+| [文档窗口](02-design/document-windows.md) | 侧栏定位当前文档、默认目录折叠、当前窗口切换、空白未命名窗口复用与草稿保护 |
 | [在线更新设计](03-architecture/online-updates.md) | 已确认的三级更新源、下载校验、安装重启与发布边界 |
 | [ELK 流程图布局](03-architecture/flowchart-elk-layout.md) | 原生 ELK 适配、分组与坐标、字体、回退及资源保护 |
 | [流程图阅读顺序](04-quality/flowchart-reading-order.md) | 多循环图主线顺序、外围回退线、分支引号与 Typora 截图对照 |
@@ -24,6 +24,7 @@
 | [Markdown 交互](04-quality/markdown-interactions.md) | 复选框原位勾选、链接手形光标、表格与换行链接、只读与源码模式边界 |
 | [段落空行间距](04-quality/paragraph-spacing.md) | Windows / macOS 共用的分隔空行高度、连续空行与源码边界、应用配置与编辑缓存回归 |
 | [正文滚动条](04-quality/document-scrollbar.md) | 窗口最右侧窄滚动条、内容长度与滚动位置、渲染缓存同步及模式 / 主题回归 |
+| [大纲章节定位](04-quality/outline-navigation.md) | 双向跳转顶端对齐、已可见章节重定位、源码 / 打字机模式与文末范围 |
 | [长文档渲染性能](04-quality/render-performance-analysis.md) | 实测开销、卡顿来源与优化顺序 |
 | [渲染性能优化](04-quality/render-performance-optimization.md) | 五项优化实现、缓存回归与原生复测边界 |
 | [流程图内存与独立查看](04-quality/diagram-memory-and-viewer.md) | 取消闲置缓存、活动图片弱引用共享、整篇预生成、最多 5 并发、骨架与高清图回收及内存对照 |

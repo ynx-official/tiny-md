@@ -235,6 +235,15 @@ fn check_sidebar_switch(cx: &mut TestAppContext, mode: SidebarMode, selector: &'
         window.refresh();
         window.draw(cx).clear();
     });
+    if mode == SidebarMode::Tree {
+        let folder = cx.debug_bounds("document-entry-1").expect("nested folder");
+        cx.simulate_click(folder.center(), Modifiers::none());
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+        });
+    }
     let row = cx.debug_bounds(selector).expect("second note row");
     cx.simulate_click(row.center(), Modifiers::none());
     cx.run_until_parked();

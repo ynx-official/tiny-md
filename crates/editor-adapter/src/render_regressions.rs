@@ -986,7 +986,7 @@ fn markdown_interaction_checkbox_keeps_the_scrolled_view(cx: &mut TestAppContext
     for typewriter in [false, true] {
         editor.update(cx, |editor, cx| {
             editor.typewriter = typewriter;
-            editor.scroll_to_cursor = false;
+            editor.scroll_request = None;
             editor
                 .scroll
                 .set_offset(point(px(0.0), px(-editor.layout[55].y.get() + 60.0)));
@@ -1297,7 +1297,7 @@ fn composition_and_source_mode_keep_the_painted_caret_with_the_text(cx: &mut Tes
     let (editor, cx) = cx.add_window_view(|window, cx| {
         let mut editor = MarkdownEditor::new(cx).value(&original);
         editor.model.doc_end(false);
-        editor.scroll_to_cursor = true;
+        editor.scroll_request = Some(ScrollRequest::RevealCursor);
         window.focus(&editor.focus);
         editor
     });

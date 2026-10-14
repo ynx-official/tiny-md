@@ -27,8 +27,12 @@ mod editor_style_tests;
 mod file_open_tests;
 mod library;
 mod menus;
+#[cfg(test)]
+mod outline_navigation_tests;
 mod panels;
 mod preferences;
+#[cfg(test)]
+mod sidebar_navigation_tests;
 mod sidebar_resize;
 #[cfg(test)]
 mod sidebar_resize_tests;
@@ -287,6 +291,7 @@ struct TinyMd {
     sidebar_mode: SidebarMode,
     sidebar_sizing: sidebar_resize::SidebarSizing,
     sidebar_scroll: [ScrollHandle; 3],
+    sidebar_reveal: [bool; 2],
     library_root: Option<PathBuf>,
     documents: Vec<library::Entry>,
     library_error: Option<String>,
@@ -544,6 +549,7 @@ impl TinyMd {
             sidebar_mode: SidebarMode::Documents,
             sidebar_sizing: sidebar_resize::SidebarSizing::default(),
             sidebar_scroll: std::array::from_fn(|_| ScrollHandle::new()),
+            sidebar_reveal: [true; 2],
             library_root,
             documents: vec![],
             library_error: None,
@@ -686,6 +692,7 @@ impl TinyMd {
         {
             self.library_root = Some(parent.to_owned());
         }
+        self.reset_sidebar_navigation();
         if let Some(path) = self.document.path() {
             remember(path, cx);
         }
@@ -940,9 +947,8 @@ impl TinyMd {
         if self.busy {
             return;
         }
-        self.editor.update(cx, |editor, cx| {
-            editor.edit(cx, |model| model.move_to(line, 0, false))
-        });
+        self.editor
+            .update(cx, |editor, cx| editor.jump_to_line(line, cx));
         self.editor.read(cx).focus_handle().focus(window);
     }
 
@@ -1390,8 +1396,7 @@ impl Render for TinyMd {
                                     .tab_stop(false)
                                     .selected(self.sidebar)
                                     .on_click(cx.listener(|this, _, _, cx| {
-                                        this.sidebar = !this.sidebar;
-                                        cx.notify();
+                                        this.toggle_sidebar(cx);
                                     })),
                             )
                             .child(
@@ -1515,8 +1520,7 @@ impl Render for TinyMd {
                 }
             }))
             .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| {
-                this.sidebar = !this.sidebar;
-                cx.notify();
+                this.toggle_sidebar(cx);
             }))
             .on_action(cx.listener(|this, _: &ShowDocuments, _, cx| {
                 this.show_sidebar(SidebarMode::Documents, cx)
