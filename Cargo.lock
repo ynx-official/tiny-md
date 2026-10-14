@@ -1527,6 +1527,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "252afb9ae5eaa683babdc6a068b3f5726eb19e05070c731f9b2a23a7c3e8ed34"
 
 [[package]]
+name = "elkrs"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a0aa6d17007599c4bb42b342b55148832289bc8c7e41d83f01b19af1ef363de4"
+dependencies = [
+ "indexmap",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "embed-resource"
 version = "3.0.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6117,7 +6128,7 @@ dependencies = [
 
 [[package]]
 name = "tiny-md"
-version = "0.2.7"
+version = "0.2.8"
 dependencies = [
  "anyhow",
  "embed-resource",
@@ -6138,7 +6149,7 @@ dependencies = [
 
 [[package]]
 name = "tiny-md-document"
-version = "0.2.7"
+version = "0.2.8"
 dependencies = [
  "diffy",
  "notify",
@@ -6147,20 +6158,26 @@ dependencies = [
 
 [[package]]
 name = "tiny-md-editor"
-version = "0.2.7"
+version = "0.2.8"
 dependencies = [
  "async-lock",
  "diffy",
+ "elkrs",
  "gpui",
  "guise-ui",
+ "image",
  "mermaid-rs-renderer",
+ "regex",
+ "resvg",
+ "serde_json",
  "syntect",
  "unicode-segmentation",
+ "usvg",
 ]
 
 [[package]]
 name = "tiny-md-updater"
-version = "0.2.7"
+version = "0.2.8"
 dependencies = [
  "anyhow",
  "reqwest",

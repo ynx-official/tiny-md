@@ -4,7 +4,7 @@ default-members = ["crates/app"]
 resolver = "2"
 
 [workspace.package]
-version = "0.2.7"
+version = "0.2.8"
 edition = "2024"
 license = "MIT"
 publish = false
@@ -20,28 +20,10 @@ tiny-md-updater = { path = "crates/updater" }
 [profile.dev]
 debug = 1
 
-# Diagram layout, font shaping and SVG rasterization are CPU-heavy even in
-# development. Optimize these dependencies so `cargo run` stays usable with
-# large diagrams while keeping workspace code quick to rebuild and debug.
-[profile.dev.package.mermaid-rs-renderer]
-opt-level = 2
-
-[profile.dev.package.resvg]
-opt-level = 2
-
-[profile.dev.package.usvg]
-opt-level = 2
-
-[profile.dev.package.tiny-skia]
-opt-level = 2
-
-[profile.dev.package.fontdb]
-opt-level = 2
-
-[profile.dev.package.rustybuzz]
-opt-level = 2
-
-[profile.dev.package.ttf-parser]
+# Rendering crosses many dependency boundaries (font shaping, geometry, parsing
+# and GPUI). Keep third-party runtime code optimized while workspace code stays
+# quick to rebuild with debug assertions and symbols.
+[profile.dev.package."*"]
 opt-level = 2
 
 [profile.release]

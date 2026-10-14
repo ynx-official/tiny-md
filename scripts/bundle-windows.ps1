@@ -29,6 +29,14 @@ $bundle = 'target/windows/Tiny MD'
 New-Item -ItemType Directory -Force -Path $bundle, 'target/release-assets' | Out-Null
 Copy-Item -LiteralPath $executable -Destination "$bundle/tiny-md.exe" -Force
 Copy-Item -LiteralPath 'fixtures/welcome.md' -Destination "$bundle/welcome.md" -Force
+# Keep the existing three-file portable layout accepted by older updaters.
+# Carry dependency notices inside the Markdown source without changing the welcome text.
+$noticeText = "`r`n<!--`r`nTiny MD third-party notices`r`n"
+foreach ($noticePath in @('LICENSE', 'crates/editor-adapter/THIRD_PARTY.md', 'crates/editor-adapter/LICENSE.guise', 'crates/editor-adapter/LICENSE.elkrs')) {
+    $noticeText += "`r`n$noticePath`r`n" + (Get-Content -LiteralPath $noticePath -Raw)
+}
+$noticeText += "`r`n-->`r`n"
+Add-Content -LiteralPath "$bundle/welcome.md" -Value $noticeText -Encoding utf8
 Set-Content -LiteralPath "$bundle/version.txt" -Value $Version -Encoding utf8
 $portableArchive = "target/release-assets/tiny-md-v$Version-windows-x64-portable.zip"
 Compress-Archive -LiteralPath "$bundle/tiny-md.exe", "$bundle/version.txt", "$bundle/welcome.md" -DestinationPath $portableArchive -Force

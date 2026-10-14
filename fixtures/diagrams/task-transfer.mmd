@@ -1,0 +1,23 @@
+flowchart TD
+  U[原责任人缺席、离职、冲突或无权限继续] --> PAUSE[暂停当前任务的下一步动作<br/>不回退项目阶段]
+  PAUSE --> SENSITIVE{是否涉及核验、签字、复验、放行或终止确认?}
+  SENSITIVE -->|否| SELECT[协调人选择具备同类权限的替岗人]
+  SENSITIVE -->|是| APPROVE[按已批准的岗位责任或例外规则审批替岗]
+  APPROVE --> OK{审批通过?}
+  OK -->|否| WAIT[保持任务待处理或待决<br/>不得越权代办]
+  OK -->|是| SELECT
+  SELECT --> ELIGIBLE{候选人是否具备同类授权<br/>并能承担当前任务?}
+  ELIGIBLE -->|否| RESELECT[重新选择合格的授权替岗人] --> SELECT
+  ELIGIBLE -->|是| OVERLAP{候选人是否同时承担<br/>相关上游或下游岗位?}
+  OVERLAP -->|否| TRANSFER[系统转移当前任务责任<br/>授予当前任务所需临时权限]
+  OVERLAP -->|是| RULE{兼岗和职责分离规则<br/>是否已经批准?}
+  RULE -->|否| WAIT
+  RULE -->|是| CONFLICT{按已批准规则<br/>本次兼岗是否发生职责冲突?}
+  CONFLICT -->|否| TRANSFER
+  CONFLICT -->|是| EXCEPTION{批准规则是否允许例外<br/>且本次审批通过?}
+  EXCEPTION -->|否| RESELECT
+  EXCEPTION -->|是| EXAPPROVE[记录例外原因、适用范围和批准人] --> TRANSFER
+  TRANSFER --> READ[替岗人查看原版本、缺项、检查结果和历史操作]
+  READ --> CONTINUE[从同一任务继续处理<br/>不重新创建项目、不覆盖原记录]
+  CONTINUE --> END[任务接收、完成、取消或再次转交]
+  END --> REVOKE[撤销临时权限<br/>保留完整转交审计]

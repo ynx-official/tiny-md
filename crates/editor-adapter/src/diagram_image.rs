@@ -125,7 +125,6 @@ impl DiagramImage {
             return;
         }
         let diagram = self.diagram.clone();
-        let renderer = cx.svg_renderer();
         let executor = cx.background_executor().clone();
         let high_definition = self.high_definition;
         let capacity = crate::diagram_work::raster(cx);
@@ -158,10 +157,7 @@ impl DiagramImage {
                 executor
                     .spawn(async move {
                         let _permit = permit;
-                        let result = diagram
-                            .image_at_size(requested)
-                            .to_image_data(renderer)
-                            .map_err(|error| error.to_string());
+                        let result = crate::diagram_raster::decode(&diagram, requested);
                         (result, ticket, request_permit)
                     })
                     .await

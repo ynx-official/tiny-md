@@ -64,7 +64,7 @@ Tiny MD 面向本机 Markdown 笔记和技术文档写作。
 | 界面组件 | GPUI Component 0.5.0 |
 | Markdown 编辑核心 | Guise（guise-ui）1.9.1 |
 | 代码高亮 | Syntect 5.3.0 |
-| 流程图渲染 | mermaid-rs-renderer 0.3.1 |
+| 流程图渲染 | mermaid-rs-renderer 0.3.1 + elkrs 0.1.1 |
 
 ## 🚀 从源码运行
 
@@ -93,7 +93,7 @@ cargo run --locked -p tiny-md -- fixtures/welcome.md
 ```
 
 Windows 的示例启动使用 `./scripts/run-windows.ps1 -Document './fixtures/welcome.md'`。
-默认开发构建会优化流程图布局、字体处理与 SVG 位图生成依赖，首次使用这项配置需要重新编译相关依赖。
+默认开发构建按优化级别 2 编译第三方依赖，工作区代码保留开发调试配置；首次使用这项配置需要重新编译依赖。
 测量发行版性能时，Windows 使用 `./scripts/run-windows.ps1 -Release`，macOS 使用 `cargo run --locked --release -p tiny-md`。
 检查命令为 Windows 的 `./scripts/check.ps1` 或 macOS 的 `sh scripts/check.sh`，需要 Python 3.11+。
 打包说明见 [构建发布](docs/releases.md)。
@@ -128,5 +128,5 @@ Windows 的示例启动使用 `./scripts/run-windows.ps1 -Document './fixtures/w
 **MIT License**，完整条款见 [LICENSE](LICENSE)。
 
 第三方依赖与改编代码保留各自的许可证和版权声明。
-Guise 编辑器适配的来源见 [第三方代码说明](crates/editor-adapter/THIRD_PARTY.md)，
-原始许可见 [LICENSE.guise](crates/editor-adapter/LICENSE.guise)。
+Guise 编辑器适配和 ELK 的来源见 [第三方代码说明](crates/editor-adapter/THIRD_PARTY.md)，
+原始许可见 [LICENSE.guise](crates/editor-adapter/LICENSE.guise) 和 [LICENSE.elkrs](crates/editor-adapter/LICENSE.elkrs)。

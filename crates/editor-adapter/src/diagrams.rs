@@ -1,12 +1,11 @@
 //! Native Mermaid → SVG. GPUI decodes the SVG off the UI thread.
 use crate::diagram_image::DiagramImage;
+use crate::mermaid_parse::parse;
 use gpui::{
     App, AppContext, Div, Entity, Hsla, Image, ImageFormat, ScrollHandle, Task, div, point,
     prelude::*, px,
 };
-use mermaid_rs_renderer::{
-    LayoutConfig, Theme, compute_layout, measure_svg_dimensions, parse_mermaid_strict,
-};
+use mermaid_rs_renderer::{LayoutConfig, Theme, measure_svg_dimensions};
 use std::sync::Arc;
 
 #[derive(Clone, Hash, PartialEq, Eq)]
@@ -282,7 +281,7 @@ pub fn render(key: &DiagramKey) -> Result<Diagram, String> {
     if key.source.len() > 64 * 1024 {
         return Err("流程图源码过长，请拆分为多个图。".into());
     }
-    let parsed = parse_mermaid_strict(&key.source).map_err(|e| e.to_string())?;
+    let parsed = parse(&key.source)?;
     if parsed.graph.kind == mermaid_rs_renderer::DiagramKind::Flowchart
         && parsed.graph.nodes.is_empty()
     {
@@ -296,7 +295,14 @@ pub fn render(key: &DiagramKey) -> Result<Diagram, String> {
     } else {
         Theme::modern()
     };
-    theme.font_family = "Helvetica Neue, PingFang SC, sans-serif".into();
+    // Resolve Chinese with an installed platform face before USVG has to scan
+    // the system font database for a fallback on every shaped text run.
+    theme.font_family = if cfg!(target_os = "windows") {
+        "Microsoft YaHei, Segoe UI, sans-serif"
+    } else {
+        "Helvetica Neue, PingFang SC, sans-serif"
+    }
+    .into();
     theme.font_size = 16.0;
     theme.background = "transparent".into();
     theme.edge_label_background = "transparent".into();
@@ -314,14 +320,17 @@ pub fn render(key: &DiagramKey) -> Result<Diagram, String> {
         theme.line_color = "#617F70".into();
     }
     let config = LayoutConfig::default();
-    let layout = compute_layout(&parsed.graph, &theme, &config);
+    let (layout, backend) =
+        crate::diagram_layout::layout(&parsed.graph, &theme, &config, parsed.init_config.as_ref());
     let dimensions = measure_svg_dimensions(&layout, &config, None);
     if !dimensions.width.is_finite()
         || !dimensions.height.is_finite()
         || dimensions.width <= 0.0
         || dimensions.height <= 0.0
-        || dimensions.width > 12000.0
-        || dimensions.height > 12000.0
+        // ELK can produce valid tall compound graphs. The vector canvas does
+        // not allocate pixels; both preview and viewer still enforce 64 MiB.
+        || dimensions.width > 128000.0
+        || dimensions.height > 128000.0
     {
         return Err("流程图尺寸过大，无法预览。".into());
     }
@@ -332,6 +341,8 @@ pub fn render(key: &DiagramKey) -> Result<Diagram, String> {
         &config,
         Some((dimensions.width, dimensions.height)),
     );
+    // The marker is diagnostic metadata; it never appears in the editor UI.
+    let svg = svg.replacen("<svg ", &format!("<svg data-layout=\"{backend:?}\" "), 1);
     Ok(Diagram {
         image: Arc::new(Image::from_bytes(ImageFormat::Svg, svg.into_bytes())),
         width: dimensions.width,
@@ -343,11 +354,133 @@ pub fn render(key: &DiagramKey) -> Result<Diagram, String> {
 mod tests {
     use super::*;
 
-    /// Opt-in measurement of the real layout and GPUI SVG decode paths. Timings
+    #[test]
+    fn task_transfer_flowchart_with_uppercase_end_and_line_breaks_renders() {
+        let source = include_str!("../../../fixtures/diagrams/task-transfer.mmd");
+        let parsed = parse(source).expect("the complete task-transfer source is a valid flowchart");
+        assert_eq!(
+            parsed.graph.nodes.len(),
+            19,
+            "nodes={:?}; edges={:?}",
+            parsed.graph.nodes.keys().collect::<Vec<_>>(),
+            parsed
+                .graph
+                .edges
+                .iter()
+                .map(|edge| (&edge.from, &edge.to))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(parsed.graph.edges.len(), 24);
+        assert!(parsed.graph.nodes.contains_key("END"));
+        for dark in [false, true] {
+            let diagram = render(&DiagramKey {
+                source: source.into(),
+                dark,
+            })
+            .expect("valid task-transfer source must render");
+            let (width, height) = diagram.display_size(1000.0, None);
+            let pixels = crate::diagram_raster::decode(
+                &diagram,
+                RasterSize::for_display(width, height, 2.0),
+            )
+            .unwrap();
+            assert!(
+                pixels
+                    .as_bytes(0)
+                    .unwrap()
+                    .chunks_exact(4)
+                    .any(|pixel| pixel[3] != 0)
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "set TINY_MD_DIAGRAM_DOCUMENT to profile SVG decoding"]
+    fn profile_svg_decode_phases() {
+        let text =
+            std::fs::read_to_string(std::env::var_os("TINY_MD_DIAGRAM_DOCUMENT").unwrap()).unwrap();
+        let (blocks, _) =
+            crate::code_blocks::collect(&text.lines().map(str::to_owned).collect::<Vec<_>>());
+        let index = std::env::var("TINY_MD_DIAGRAM_SNAPSHOT_INDEX")
+            .ok()
+            .map(|value| value.parse::<usize>().unwrap())
+            .unwrap_or(2);
+        assert!(index > 0);
+        let block = blocks
+            .iter()
+            .filter(|block| block.is_mermaid())
+            .nth(index - 1)
+            .unwrap();
+        let diagram = render(&DiagramKey {
+            source: block.source.clone(),
+            dark: std::env::var("TINY_MD_DIAGRAM_SNAPSHOT_DARK").is_ok_and(|value| value == "1"),
+        })
+        .unwrap();
+        let (width, height) = diagram.display_size(1000.0, None);
+        let size = RasterSize::for_display(width, height, 2.0);
+        let started = std::time::Instant::now();
+        let options = crate::diagram_raster::options();
+        println!(
+            "font_prepare_ms={:.3}",
+            started.elapsed().as_secs_f64() * 1000.0
+        );
+        let image = diagram.image_at_size(size);
+        let started = std::time::Instant::now();
+        let tree = usvg::Tree::from_data(image.bytes(), options).unwrap();
+        println!(
+            "svg_parse_and_shape_ms={:.3}",
+            started.elapsed().as_secs_f64() * 1000.0
+        );
+        let started = std::time::Instant::now();
+        let mut pixmap = resvg::tiny_skia::Pixmap::new(size.width, size.height).unwrap();
+        println!(
+            "pixel_allocate_ms={:.3}",
+            started.elapsed().as_secs_f64() * 1000.0
+        );
+        let started = std::time::Instant::now();
+        resvg::render(
+            &tree,
+            resvg::tiny_skia::Transform::identity(),
+            &mut pixmap.as_mut(),
+        );
+        println!(
+            "raster_paint_ms={:.3}",
+            started.elapsed().as_secs_f64() * 1000.0
+        );
+        if let Some(directory) = std::env::var_os("TINY_MD_DIAGRAM_SNAPSHOT_DIRECTORY") {
+            let directory = std::path::PathBuf::from(directory);
+            std::fs::create_dir_all(&directory).unwrap();
+            std::fs::write(directory.join("elk-large.svg"), image.bytes()).unwrap();
+            pixmap.save_png(directory.join("elk-large.png")).unwrap();
+        }
+    }
+
+    #[test]
+    fn long_elk_layouts_keep_the_existing_pixel_budget() {
+        let source = format!(
+            "flowchart TD\n{}",
+            (0..159)
+                .map(|index| format!("N{index} --> N{}", index + 1))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+        let diagram = render(&DiagramKey {
+            source,
+            dark: false,
+        })
+        .expect("valid long ELK diagrams must remain previewable");
+        assert!(diagram.height > 12000.0);
+        let (width, height) = diagram.display_size(1000.0, None);
+        let pixels = RasterSize::for_display(width, height, 2.0);
+        assert!(pixels.width <= 4096 && pixels.height <= 8192);
+        assert!(pixels.bytes() <= 64 * 1024 * 1024);
+    }
+
+    /// Opt-in measurement of the app's layout and SVG decode paths. Timings
     /// are diagnostic output, not wall-clock assertions or native-window FPS.
-    #[gpui::test]
+    #[test]
     #[ignore = "set TINY_MD_DIAGRAM_DOCUMENT to profile a local document"]
-    fn profile_diagram_generation(cx: &mut gpui::TestAppContext) {
+    fn profile_diagram_generation() {
         let path =
             std::env::var_os("TINY_MD_DIAGRAM_DOCUMENT").expect("set TINY_MD_DIAGRAM_DOCUMENT");
         let text = std::fs::read_to_string(path).expect("read profile document");
@@ -367,13 +500,12 @@ mod tests {
             .filter(|block| block.is_mermaid())
             .take(limit)
             .collect::<Vec<_>>();
-        let renderer = cx.update(|cx| cx.svg_renderer());
         let next = std::sync::atomic::AtomicUsize::new(0);
         let started = std::time::Instant::now();
         let totals = std::thread::scope(|scope| {
             let mut tasks = Vec::new();
             for _ in 0..workers {
-                let (blocks, next, renderer) = (&blocks, &next, renderer.clone());
+                let (blocks, next) = (&blocks, &next);
                 tasks.push(scope.spawn(move || {
                     let mut totals = (0.0, 0.0, 0usize, 0, 0);
                     loop {
@@ -381,12 +513,8 @@ mod tests {
                         let Some(block) = blocks.get(index) else {
                             break;
                         };
-                        let result = profile_one_diagram(block, index, |diagram, size| {
-                            diagram
-                                .image_at_size(size)
-                                .to_image_data(renderer.clone())
-                                .map_err(|error| error.to_string())
-                        });
+                        let result =
+                            profile_one_diagram(block, index, crate::diagram_raster::decode);
                         totals.0 += result.0;
                         totals.1 += result.1;
                         totals.2 += result.2;
@@ -421,7 +549,6 @@ mod tests {
     fn profile_one_diagram(
         block: &crate::code_blocks::CodeBlock,
         index: usize,
-        // GPUI exposes decoding but does not export its renderer type.
         decode: impl FnOnce(&Diagram, RasterSize) -> Result<Arc<gpui::RenderImage>, String>,
     ) -> (f64, f64, usize, usize, usize) {
         let started = std::time::Instant::now();
@@ -440,10 +567,18 @@ mod tests {
                 return (layout, 0.0, 0, 0, 1);
             }
         };
+        let svg = std::str::from_utf8(diagram.image.bytes()).unwrap();
+        let backend = svg
+            .split("data-layout=\"")
+            .nth(1)
+            .unwrap()
+            .split('"')
+            .next()
+            .unwrap();
         // Repeat only parsing after the real cold generation to locate
         // parser cost without warming its caches before that measurement.
         let started = std::time::Instant::now();
-        let parsed = parse_mermaid_strict(&block.source).expect("already rendered source");
+        let parsed = parse(&block.source).expect("already rendered source");
         let parse_repeat_ms = started.elapsed().as_secs_f64() * 1000.0;
         println!(
             "diagram_parse_probe index={} parse_repeat_ms={parse_repeat_ms:.3} nodes={} edges={}",
@@ -457,7 +592,7 @@ mod tests {
         let image = decode(&diagram, size).expect("decode profile diagram");
         let pixels = started.elapsed().as_secs_f64() * 1000.0;
         println!(
-            "diagram_profile index={} layout_ms={layout:.3} pixels_ms={pixels:.3} pixels={}x{}",
+            "diagram_profile index={} backend={backend} layout_ms={layout:.3} pixels_ms={pixels:.3} pixels={}x{}",
             index + 1,
             size.width,
             size.height

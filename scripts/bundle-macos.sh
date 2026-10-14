@@ -41,6 +41,8 @@ fi
 mkdir -p "$bundle/Contents/MacOS" "$bundle/Contents/Resources"
 cp "target/$profile/tiny-md" "$bundle/Contents/MacOS/tiny-md"
 cp assets/icons/tiny-md.icns "$bundle/Contents/Resources/tiny-md.icns"
+mkdir -p "$bundle/Contents/Resources/licenses"
+cp LICENSE crates/editor-adapter/THIRD_PARTY.md crates/editor-adapter/LICENSE.guise crates/editor-adapter/LICENSE.elkrs "$bundle/Contents/Resources/licenses/"
 cat > "$bundle/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

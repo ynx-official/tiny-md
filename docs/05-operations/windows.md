@@ -30,7 +30,7 @@ Windows 10 兼容性尚待实际运行验收。
 `check.ps1` 依次执行格式检查、工作区测试和 Clippy；任一步失败均终止。
 
 编译后的开发程序为 `target/debug/tiny-md.exe`，Windows GUI 子系统避免双击时出现控制台。
-2026-10-14 起，普通 `cargo run` / 开发启动会对 Mermaid、SVG 光栅化与字体处理依赖使用 `opt-level = 2`，
+2026-10-14 起，普通 `cargo run` / 开发启动会对第三方依赖使用 `opt-level = 2`，
 工作区代码保留开发调试配置。第一次切换该配置会重新编译相关依赖；已启动的旧进程不会自动更新。
 发行版性能对照使用上面的 `-Release` 命令。分段测量与当前验证范围见
 [流程图加载性能](../04-quality/diagram-load-performance.md)。

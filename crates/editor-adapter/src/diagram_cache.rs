@@ -8,7 +8,9 @@ use std::{
 };
 
 const SVG_BUDGET: usize = 16 * 1024 * 1024;
-const PIXEL_BUDGET: usize = 256 * 1024 * 1024;
+// The complete 35-diagram reference document uses about 293 MiB at 200% DPI.
+// Keep it reusable after valid END/labelled-chain diagrams no longer fail.
+const PIXEL_BUDGET: usize = 384 * 1024 * 1024;
 const ENTRY_LIMIT: usize = 128;
 
 type RequestMap<K> = Mutex<HashMap<K, Weak<RequestGate<K>>>>;

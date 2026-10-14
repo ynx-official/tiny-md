@@ -2,7 +2,7 @@
 
 - 状态：Review
 - 最后更新：2026-10-14
-- 关联文档：[文档索引](../README.md)、[缓存与调度](diagram-memory-and-viewer.md)、[Windows 运行](../05-operations/windows.md)
+- 关联文档：[文档索引](../README.md)、[ELK 设计](../03-architecture/flowchart-elk-layout.md)、[缓存与调度](diagram-memory-and-viewer.md)、[Windows 运行](../05-operations/windows.md)
 
 ## 输入与测量范围
 
@@ -10,9 +10,13 @@
 `D:\project\蓝蔚士项目分析v2\docs\02-design\end-to-end-flow-diagrams.md`。
 文件为 89,266 字节、35 个 Mermaid 块，与之前的测试副本内容一致。
 测试前后 SHA-256 为 `0F4C05EAB625F10DF388D3D0091894F3566F1734E9920368BA9C56BD3359C98E`。
-原文件未修改；34 张有效图完成生成，第 23 张保留既有的语法错误。
+原文件未修改。ELK 接入时曾生成 34 张、误报第 23 张错误；后续确认它是正常源码，
+错误来自大写 END 与带标签链式连线的兼容问题，现已修正，35 张全部生成。
+依据见 [解析兼容性](mermaid-parser-compatibility.md)，历史 34 / 1 是当时的运行结果。
 
-诊断直接调用项目的 `diagrams::render` 与 GPUI SVG 解码路径，逐图重新生成。
+诊断直接调用项目的 `diagrams::render` 与当前 SVG 解码入口，逐图重新生成。
+接入 ELK 前使用 GPUI 的 SVG 解码器；当前使用相同版本的 USVG / resvg，复用有界系统字体字节后生成 `RenderImage`。
+完整样本的深浅主题共 70 张有效位图，与 GPUI 既有 SVG 分支逐字节一致；解析修正前对照为 68 张。
 显示宽度固定为 1000 逻辑像素、DPI 为 200%，保留现有边长和像素预算保护。
 不读取应用的 SVG / 位图缓存；底层字体库自然保留同一进程内的初始化与字体复用。
 `layout_ms` 包含 Mermaid 解析、布局与 SVG 输出，`pixels_ms` 包含目标画布调整和 SVG 到像素的转换。
@@ -23,7 +27,42 @@
 阶段总和是累计任务时间，在多线程下不能当作墙钟时间。构建时间不计入生成时间。
 本轮没有实际测量 Typora，也没有完成 Windows / macOS 原生窗口计时。
 
-## 实测结果
+## 完整 35 图的当前结果
+
+修复解析兼容性后，同一份文档 35 张全部生成，5 工作者 CPU 墙钟 **0.621 秒**，
+累计 SVG 0.376 秒、累计位图 2.519 秒，目标像素合计 293.31 MiB。
+第 23 张为 19 节点、24 连线，采用 ELK，正文解码为 2000 × 4144。
+正文缓存调整为有界 384 MiB，完整重开复用 35 张原位图；深浅主题 70 张位图对照通过。
+该 CPU 计时仍不包含原生窗口显示，验证与原始日志以解析兼容性记录为准。
+
+## ELK 与字体复用结果（解析修正前）
+
+保留 5 个并发和所有图的预生成，完整样本的 CPU 墙钟时间由上轮 **7.989 秒降至 0.524 秒**。
+另起三个测试进程复测为 **0.515 / 0.537 / 0.518 秒**。每次都重新生成全部图，34 张有效图成功，
+第 23 张当时被校验器误报错误。没有读取应用的 SVG 或正文位图缓存，没有降低 DPI 或单张像素预算。
+这是本机样本的 CPU 结果，不能写成任意文档的固定加速倍数或原生窗口的秒开时间。
+
+| 同一份文档，5 个 CPU 工作者 | 上轮原生布局 | ELK + Windows 字体，未复用字体字节 | 当前 ELK + 共享字体字节 |
+|---|---:|---:|---:|
+| CPU 墙钟时间 | 7.989 秒 | 2.696 秒 | 0.524 秒 |
+| SVG 阶段累计 | 17.185 秒 | 0.347 秒 | 0.337 秒 |
+| 位图阶段累计 | 19.096 秒 | 12.318 秒 | 2.139 秒 |
+| 成功 / 错误 | 34 / 1 | 34 / 1 | 34 / 1 |
+| 目标像素缓冲合计 | 251.97 MiB | 250.96 MiB | 250.96 MiB |
+
+像素合计随布局长宽变化；按同一适宽规则与 200% DPI 解码，不以降低像素规格换取速度。
+诊断逐图释放结果，像素合计不代表进程峰值、字体字节或活动文档缓存占用。
+
+144 节点、142 边的第 2 张，SVG 阶段由上轮并发诊断的约 4.564 秒降为约 **51.6 毫秒**，
+位图由约 3.251 秒降为约 **182 毫秒**。显式子图方向生效，图形排列与之前原生布局不同。
+旧布局单独分析中，路由约 2.302 秒、连线标签避让约 0.502 秒；移除边只测量节点约 3.5 毫秒。
+因此新适配复用原有节点 / 文字测量，将排列、路由和标签位置交给 ELK。
+
+剩余瓶颈来自文件型字体的逐字形映射。第二张单图的 SVG 解析 / 文字整形约 609 毫秒；
+将相同系统字体保留为共享字节后，本轮最终诊断约 **25.4 毫秒**，绘制约 **92.7 毫秒**。
+首次字体准备约 43.6 毫秒；该准备只在当前进程首次解码时发生，完整 CPU 计时包含首次初始化。
+
+## 接入 ELK 前的串行对照（历史）
 
 | 同一份完整文档 | 未优化开发依赖，串行 | 优化开发依赖，串行 |
 |---|---:|---:|
@@ -44,34 +83,40 @@
 未优化串行配置下，该图 SVG 生成约 17.495 秒、位图生成约 4.001 秒；重复解析源码约 16 毫秒。
 优化后的串行 SVG 生成约 3.149 秒、位图生成约 2.203 秒；重复解析约 5 毫秒。
 证据说明源码读取 / 解析不是主要等待来源，单张复杂图的 SVG 与位图生成仍需继续优化。
-SVG 生成阶段包含布局和文字测量；本轮没有继续细分两者耗时，不能将这一阶段全部归到某个内部步骤。
+当时 SVG 生成阶段包含布局和文字测量，未继续细分两者；当前细分与修正见上文。
 
 ## 已实施的修正
 
-根 `Cargo.toml` 对 Mermaid、resvg、usvg、tiny-skia、fontdb、rustybuzz、ttf-parser
-设置开发依赖 `opt-level = 2`。普通 `cargo run` 会采用这项配置；工作区代码仍保留开发调试配置。
+流程图默认使用 Rust `elkrs 0.1.1` 的 ELK layered 布局，保留文字、样式、嵌套分组、子图方向和链接。
+其他类型、显式原生布局及失败回退保留原有算法；逻辑画布扩大到 128,000，不扩大光栅化预算。
+Windows 图内字体优先使用 Microsoft YaHei / Segoe UI，macOS 字体栈保持原有设置。
+`diagram_raster.rs` 复用同版本 USVG / resvg，为系统字体字节提供最多 64 MiB 的共享预算，
+失败或超预算保留文件读取；不下载字体、不保存文档或字体到磁盘缓存。
+
+根 `Cargo.toml` 对第三方依赖设置 `opt-level = 2`。普通 `cargo run` 会采用这项配置；工作区代码仍保留开发调试配置。
 首次切换配置会重新编译相关依赖，已运行的旧进程需要退出后重新启动。
 测试 profile 继承开发配置，因此相同计算路径可在诊断测试里对照。
 正式发行 profile 原本已有优化，本次开发配置的提升不能直接写成发行版加速。
 
-没有更换渲染引擎、降低图形像素规格或改变缓存、5 个任务上限、按序显示和屏外预生成的既有行为。
+内存缓存、5 个计算任务总上限、按序显示、骨架与屏外预生成行为保留。
 诊断入口属于显式启用的 ignored 测量工具，不使用不稳定的墙钟断言，也不进入应用运行路径。
 
 ## 与 Typora 的区别及剩余瓶颈
 
 [Typora 官方说明](https://support.typora.io/Draw-Diagrams-With-Markdown/)确认其集成 Mermaid。
-[Mermaid API](https://mermaid.js.org/config/usage.html)输出 SVG；Tiny MD 当前采用另一个 Rust 原生渲染器，
-随后用 GPUI / resvg 生成完整正文位图。这两条生成链路的算法、字体处理和像素工作量不同。
+[Mermaid API](https://mermaid.js.org/config/usage.html)输出 SVG；Tiny MD 采用 Rust Mermaid 解析与 SVG 渲染，
+流程图布局改用原生 ELK，随后用 USVG / resvg 生成完整正文位图。两条链路的算法、字体处理和像素工作量不同。
 没有 Typora 同机计时或内部调用证据，不能把速度差全部归到某个未经验证的 Typora 优化策略。
 
 该文档第 2 张指定了 `defaultRenderer: elk`。
-Tiny MD 当前用 `LayoutConfig::default()` 计算 `parsed.graph`，没有将 `parsed.init_config` 切换为 ELK 引擎。
+接入前只用 `LayoutConfig::default()` 计算 `parsed.graph`，没有使用该 ELK 配置。
+当前适配处理 ELK、显式原生引擎及受支持的 `parsed.init_config` 配置；实现边界以本项目设计与回归为准。
 [Mermaid 的 ELK 说明](https://mermaid.js.org/syntax/flowchart.html)提供的是 Mermaid.js 的另一种布局能力，
-不能据此认为当前 Rust 原生渲染器已使用同一算法。
+不能据此认为第三方 Rust 移植与 Mermaid.js 的所有布局 / 配置完全一致。
 
 应用仍按要求准备所有屏外图的完整正文位图；这增加了首次打开所需的 CPU 与像素工作。
 按序显示还要求后面的结果等待前面的慢图。缓存主要改善同次运行中的复用，首次未命中仍要计算。
-后续提速重点是复杂图的布局 / 文字测量、位图生成和结果发布等待；当前证据尚未证明秒级原生打开。
+本轮显著减少布局和字体处理开销；原生结果发布、正文排版及 GPU 显示仍需用户复测，尚未证明秒级原生打开。
 
 ## 复测方式
 
@@ -86,11 +131,19 @@ cargo test --locked -p tiny-md-editor profile_diagram_generation -- --ignored --
 
 线程数可设为 1–5；省略 `TINY_MD_DIAGRAM_PROFILE_WORKERS` 时默认为 1。
 `TINY_MD_DIAGRAM_PROFILE_LIMIT` 可限制取样图数量，省略时处理全部图。
-诊断不输出图中文字或源码，只输出图序号、节点 / 边数量、尺寸与计时。
+完整计时不输出图中文字或源码，只输出图序号、引擎、节点 / 边数量、尺寸与计时。
 原始日志在忽略目录 `target/diagram-profile-unoptimized.log`、`target/diagram-profile-optimized.log`
-和 `target/diagram-profile-five-workers.log`。
+和 `target/diagram-profile-five-workers.log`；本轮最终日志为 `target/diagram-profile-elk-shared-fonts.log`
+及 `target/diagram-profile-elk-repeat-{1,2,3}.log`。
 
-## 完成前验证
+同一环境可执行 `cargo test --locked -p tiny-md-editor pixels_match_gpui -- --nocapture`，
+验证该文档所有有效图在深浅主题下与原解码器一致；省略文档变量时只验证小型字体 / 形状样本。
+`cargo test --locked -p tiny-md-editor profile_svg_decode_phases -- --ignored --nocapture` 细分单图字体、解析及绘制，
+默认选第 2 张；`TINY_MD_DIAGRAM_SNAPSHOT_INDEX` 可指定一基图序号，`TINY_MD_DIAGRAM_SNAPSHOT_DARK=1` 使用深色。
+仅显式设置 `TINY_MD_DIAGRAM_SNAPSHOT_DIRECTORY` 时写入该目录的 SVG / PNG；这些图片包含文档内容，
+只是本机诊断输出，不是应用磁盘缓存。本轮生成图目视检查覆盖分组、子图方向和箭头；原生窗口未验收。
+
+## 接入 ELK 前验证（历史）
 
 `./scripts/check.ps1` 通过：17 项发布工具测试、版本元数据、格式、190 项 Rust 测试
 （应用 64、文档 16、编辑器 95、更新器 15）及 Clippy。
@@ -99,3 +152,21 @@ cargo test --locked -p tiny-md-editor profile_diagram_generation -- --ignored --
 重开时全部 5 个计算名额被占住，确认直接复用。该 TestPlatform 回归用时 23.35 秒，不是原生窗口计时。
 `cargo build --locked -p tiny-md` 的 Windows MSVC 开发构建通过。
 文件 SHA-256 保持不变；未替换安装程序、提交、推送或发布。
+
+## ELK 接入验证（解析修正前）
+
+新增回归先复现 ELK 未接入、节点 / 箭头坐标错位、子图方向丢失、合法长图被拒绝及字体未复用，
+再实现并通过相关测试。布局回归覆盖四个方向、嵌套与跨分组边、分组端点、宽标题、圆形尺寸、
+菱形 / 圆形多端口、样式和链接、显式原生引擎及非流程图的保留路径。
+光栅化回归覆盖字体预算、重复初始化无额外副本、越界像素拒绝及像素一致性。
+
+完整样本深浅主题的 68 张位图逐字节一致（17.48 秒测试时间，包含原解码器对照）；
+完整样本缓存重开回归通过（1.74 秒测试时间，包含首次生成），全部 5 个计算名额被占用时
+仍复用 35 个 SVG / 错误结果和 34 张原位图 ID。两个测试时间都不是原生窗口计时。
+`./scripts/check.ps1` 最终通过：17 项发布工具测试、版本元数据、格式、201 项 Rust 测试
+（应用 64、文档 16、编辑器 106、更新器 15）及 Clippy。该记录是解析修正前的检查；两个计时诊断默认 ignored，
+原有一个示例 doctest 继续忽略；计时诊断已显式运行。
+Windows 开发构建最初因运行中的程序占用 `target/debug/tiny-md.exe` 被拒绝；用户保存并退出后，
+包含解析兼容性修正的 `cargo build --locked -p tiny-md` 已成功。当前完整检查为 209 项 Rust 测试，
+详细验证以 [解析兼容性](mermaid-parser-compatibility.md) 为准。
+原测试文档 SHA-256 保持不变，原生窗口与 Typora 同机计时仍未完成。

@@ -58,6 +58,12 @@ Windows 正文外层左右留白为 12 px、顶部留白为 16 px，保留编辑
 Windows 使用参考字体回退中的 `Segoe UI`，代码使用系统自带的 `Consolas`；
 macOS 保持既有系统字体及 `Menlo`。使用本机字体可避免依赖未安装的专有品牌字体。
 
+2026-10-14 流程图性能优化后，Windows 图内文字优先使用 `Microsoft YaHei`，拉丁文字回退
+`Segoe UI, sans-serif`，避免请求 macOS 字体后逐字查找中文字体。图内字号仍为 16 px，
+深浅色主题与原有样式保留；macOS 图内字体继续使用 `Helvetica Neue, PingFang SC, sans-serif`。
+ELK 改变节点排列和图形长宽，骨架与滚动锚点继续采用既有规则。设计见
+[原生 ELK 布局](../03-architecture/flowchart-elk-layout.md)。
+
 macOS 继续使用系统顶部菜单，Windows 使用窗口内菜单，两者共用业务动作与文件保存保护。
 窗口内菜单缓存属于各文档窗口，菜单勾选状态和最近文件变化时更新对应窗口的菜单定义。
 
