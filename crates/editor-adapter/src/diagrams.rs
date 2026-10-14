@@ -98,6 +98,13 @@ impl DiagramView {
             .as_ref()
             .and_then(|preview| preview.read(cx).decoded_size())
     }
+
+    #[cfg(test)]
+    pub(crate) fn preview_reference(&self, cx: &App) -> Option<std::sync::Weak<gpui::RenderImage>> {
+        self.preview
+            .as_ref()
+            .and_then(|preview| preview.read(cx).decoded_reference())
+    }
     pub fn retain_preview(&mut self, diagram: Option<&Diagram>, cx: &App) {
         if self
             .preview

@@ -1,4 +1,4 @@
-//! Inline previews share bounded CPU pixels; independent viewers own their HD image.
+//! Previews share active pixels; the last owner releases their CPU and GPU data.
 use crate::diagram_cache::{self, RasterKey};
 use crate::diagrams::{Diagram, RasterSize};
 use gpui::{App, Context, Render, RenderImage, Task, Window, div, img, prelude::*, px};
@@ -21,6 +21,7 @@ impl DiagramImage {
             if let Some(image) = this.image.take() {
                 diagram_cache::release(cx, image, None);
             }
+            cx.defer(diagram_cache::prune_idle);
         })
         .detach();
         Self {
@@ -59,6 +60,11 @@ impl DiagramImage {
     #[cfg(test)]
     pub(crate) fn decoded_id(&self) -> Option<gpui::ImageId> {
         self.image.as_ref().map(|image| image.id)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn decoded_reference(&self) -> Option<std::sync::Weak<RenderImage>> {
+        self.image.as_ref().map(Arc::downgrade)
     }
 
     /// Stop pending decoding and evict this window's texture before it is destroyed.
@@ -268,6 +274,36 @@ mod tests {
         cx.run_until_parked();
     }
 
+    #[gpui::test]
+    fn idle_preview_pixels_release_without_clearing_any_cache(cx: &mut TestAppContext) {
+        let view = cx.new(|cx| DiagramImage::new(small_diagram(), cx));
+        view.update(cx, |view, cx| view.set_display_size(300.0, 100.0, 1.0, cx));
+        finish_decoding(cx);
+        let pixels = cx.read(|cx| Arc::downgrade(view.read(cx).image.as_ref().unwrap()));
+        drop(view);
+        cx.update(|_| ());
+        cx.run_until_parked();
+        assert!(
+            pixels.upgrade().is_none(),
+            "closing the last preview must release CPU pixels without explicit cache eviction"
+        );
+    }
+
+    #[gpui::test]
+    fn idle_previous_resolution_releases_after_replacement(cx: &mut TestAppContext) {
+        let view = cx.new(|cx| DiagramImage::new(small_diagram(), cx));
+        view.update(cx, |view, cx| view.set_display_size(300.0, 100.0, 1.0, cx));
+        finish_decoding(cx);
+        let previous = cx.read(|cx| Arc::downgrade(view.read(cx).image.as_ref().unwrap()));
+        view.update(cx, |view, cx| view.set_display_size(400.0, 120.0, 2.0, cx));
+        finish_decoding(cx);
+        assert!(cx.read(|cx| view.read(cx).decoded_size().is_some()));
+        assert!(
+            previous.upgrade().is_none(),
+            "a replaced resolution must not remain in a session cache"
+        );
+    }
+
     #[gpui::test(iterations = 5)]
     fn diagram_cache_parallel_previews_share_the_same_pixels(cx: &mut TestAppContext) {
         let diagram = small_diagram();
@@ -294,18 +330,21 @@ mod tests {
     }
 
     #[gpui::test]
-    fn diagram_cache_new_previews_reuse_pixels_without_decoder_work(cx: &mut TestAppContext) {
+    fn idle_preview_reopening_schedules_fresh_decoder_work(cx: &mut TestAppContext) {
         let diagram = small_diagram();
         let first = cx.new(|cx| DiagramImage::new(diagram.clone(), cx));
         first.update(cx, |image, cx| {
             image.set_display_size(300.0, 100.0, 1.0, cx)
         });
         finish_decoding(cx);
-        let pixels = cx.read(|cx| first.read(cx).image.clone().unwrap());
+        let (previous_id, pixels) = cx.read(|cx| {
+            let image = first.read(cx).image.as_ref().unwrap();
+            (image.id, Arc::downgrade(image))
+        });
         drop(first);
         cx.update(|_| ());
         let capacity = cx.update(crate::diagram_work::raster);
-        let _permit = crate::diagram_work::occupy(&capacity);
+        let permit = crate::diagram_work::occupy(&capacity);
         let reopened = cx.new(|cx| DiagramImage::new(diagram, cx));
         reopened.update(cx, |image, cx| {
             image.set_display_size(300.0, 100.0, 1.0, cx)
@@ -313,17 +352,22 @@ mod tests {
         cx.read(|cx| {
             let reopened = reopened.read(cx);
             assert!(
-                reopened.task.is_none(),
-                "a cache hit must not schedule decoder work"
+                reopened.task.is_some(),
+                "a retired bitmap must request new decoder work"
             );
             assert!(
-                reopened
-                    .image
-                    .as_ref()
-                    .is_some_and(|image| Arc::ptr_eq(&pixels, image)),
-                "reopening must reuse the decoded pixels"
+                reopened.image.is_none(),
+                "no idle pixels may survive closing the original view"
             );
         });
+        assert!(pixels.upgrade().is_none());
+        drop(permit);
+        finish_decoding(cx);
+        assert_ne!(
+            cx.read(|cx| reopened.read(cx).decoded_id()),
+            Some(previous_id)
+        );
+        assert!(cx.read(|cx| reopened.read(cx).decoded_size().is_some()));
     }
 
     #[gpui::test]
@@ -525,11 +569,14 @@ mod tests {
     }
 
     #[gpui::test]
-    fn resize_reuses_cached_targets_and_eviction_releases_idle_pixels(cx: &mut TestAppContext) {
+    fn resize_releases_previous_targets_and_revisiting_decodes_fresh_pixels(
+        cx: &mut TestAppContext,
+    ) {
         let view = cx.new(|cx| DiagramImage::new(small_diagram(), cx));
         view.update(cx, |view, cx| view.set_display_size(300.0, 100.0, 1.0, cx));
         finish_decoding(cx);
         let first = cx.read(|cx| view.read(cx).image.clone().unwrap());
+        let first_id = first.id;
         let weak = Arc::downgrade(&first);
         view.update(cx, |view, cx| view.set_display_size(300.0, 100.0, 1.0, cx));
         assert!(cx.read(|cx| Arc::ptr_eq(&first, view.read(cx).image.as_ref().unwrap())));
@@ -537,30 +584,34 @@ mod tests {
         view.update(cx, |view, cx| view.set_display_size(200.0, 70.0, 2.0, cx));
         finish_decoding(cx);
         assert!(
-            weak.upgrade().is_some(),
-            "keep the old target in the bounded cache"
+            weak.upgrade().is_none(),
+            "release the replaced target without retaining an idle bitmap"
         );
         let resized = cx.read(|cx| Arc::downgrade(view.read(cx).image.as_ref().unwrap()));
         let capacity = cx.update(crate::diagram_work::raster);
-        let _permit = crate::diagram_work::occupy(&capacity);
+        let permit = crate::diagram_work::occupy(&capacity);
         view.update(cx, |view, cx| view.set_display_size(300.0, 100.0, 1.0, cx));
         cx.read(|cx| {
             let view = view.read(cx);
             assert!(
-                view.task.is_none(),
-                "restoring a cached resolution must skip decoding"
+                view.task.is_some(),
+                "restoring a retired resolution must decode it again"
             );
             assert!(Arc::ptr_eq(
-                &weak.upgrade().unwrap(),
+                &resized.upgrade().unwrap(),
                 view.image.as_ref().unwrap()
             ));
         });
+        drop(permit);
+        finish_decoding(cx);
+        assert!(resized.upgrade().is_none());
+        assert_ne!(cx.read(|cx| view.read(cx).decoded_id()), Some(first_id));
+        let reopened = cx.read(|cx| Arc::downgrade(view.read(cx).image.as_ref().unwrap()));
         drop(view);
         cx.update(|_| ());
         cx.run_until_parked();
-        assert!(weak.upgrade().is_some());
-        cx.update(crate::diagram_cache::clear_pixels);
         assert!(weak.upgrade().is_none());
         assert!(resized.upgrade().is_none());
+        assert!(reopened.upgrade().is_none());
     }
 }

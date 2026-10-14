@@ -4,7 +4,7 @@ use mermaid_rs_renderer::{ParseOutput, parse_mermaid_strict};
 pub(crate) fn parse(source: &str) -> Result<ParseOutput, String> {
     let validation_source = protect_end_ids_for_validation(source);
     let normalized = normalize_pipe_chains(source);
-    if validation_source.is_some() || normalized.is_some() {
+    let mut parsed = if validation_source.is_some() || normalized.is_some() {
         // 0.3.1's balance preflight lowercases whole lines, while its actual
         // flowchart parser correctly treats only a bare lowercase `end` as a
         // closer. Fix only the validation copy. Pipe-labelled chains are
@@ -13,10 +13,26 @@ pub(crate) fn parse(source: &str) -> Result<ParseOutput, String> {
         mermaid_rs_renderer::validator::validate(validation_source.as_deref().unwrap_or(source))
             .map_err(|error| error.to_string())?;
         check_node_brackets(source)?;
-        return mermaid_rs_renderer::parse_mermaid(normalized.as_deref().unwrap_or(source))
-            .map_err(|error| error.to_string());
+        mermaid_rs_renderer::parse_mermaid(normalized.as_deref().unwrap_or(source))
+            .map_err(|error| error.to_string())?
+    } else {
+        parse_mermaid_strict(source).map_err(|error| error.to_string())?
+    };
+    if parsed.graph.kind == mermaid_rs_renderer::DiagramKind::Flowchart {
+        // The pinned parser retains double-quote delimiters on pipe labels.
+        // Strip one matching pair in the IR, leaving source, inner quotes and
+        // entity escapes intact, just as node-label delimiters are omitted.
+        for edge in &mut parsed.graph.edges {
+            if let Some(text) = edge.label.as_deref()
+                && let Some(text) = text
+                    .strip_prefix('"')
+                    .and_then(|text| text.strip_suffix('"'))
+            {
+                edge.label = Some(text.to_owned());
+            }
+        }
     }
-    parse_mermaid_strict(source).map_err(|error| error.to_string())
+    Ok(parsed)
 }
 
 fn normalize_pipe_chains(source: &str) -> Option<String> {
@@ -267,6 +283,28 @@ fn protect_end_ids_for_validation(source: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quoted_flowchart_edge_labels_display_the_text_without_syntax_quotes() {
+        let parsed = parse(
+            "flowchart TD\nA -->|\"Go / Conditional Go\"| B\nB -->|\"含 \\\"引号\\\" 的文字\"| C -->|继续| D\nD -->|\"#quot;原样引号#quot;\"| E",
+        )
+        .unwrap();
+        assert_eq!(parsed.graph.edges.len(), 4);
+        assert_eq!(
+            parsed.graph.edges[0].label.as_deref(),
+            Some("Go / Conditional Go")
+        );
+        assert_eq!(
+            parsed.graph.edges[1].label.as_deref(),
+            Some("含 \\\"引号\\\" 的文字")
+        );
+        assert_eq!(parsed.graph.edges[2].label.as_deref(), Some("继续"));
+        assert_eq!(
+            parsed.graph.edges[3].label.as_deref(),
+            Some("#quot;原样引号#quot;")
+        );
+    }
 
     #[test]
     fn compatibility_keeps_frontmatter_literal_brackets_and_single_quoted_labels() {

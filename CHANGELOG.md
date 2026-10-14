@@ -3,6 +3,15 @@
 面向用户的精简摘要；完整说明、兼容性、已知问题和验证依据见
 [版本总览](docs/06-delivery/versions/index.md)。版本正文只维护在对应版本详情中。
 
+## [0.2.10] - 2026-10-14
+
+### 改进
+
+- 流程图取消闲置 SVG 与位图缓存，关闭文档或替换图片后释放旧数据；保留整篇预生成、正在使用的图片复用与最多 5 个并发。
+- 改进多循环流程图的阅读顺序，优先保留从起点推进的主线，回退连线绕过节点，并去掉分支标签的语法双引号。
+
+详细变化见版本详情。
+
 ## [Unreleased]
 
 ## [0.2.9] - 2026-10-14
@@ -121,6 +130,7 @@
 - 首次提供 macOS Apple Silicon DMG 和 Windows x64 安装包。
 - 原生 Markdown 写作窗口与基本文档操作。
 
+[0.2.10]: docs/06-delivery/versions/v0.2.10.md
 [0.2.9]: docs/06-delivery/versions/v0.2.9.md
 [0.2.7]: docs/06-delivery/versions/v0.2.7.md
 [0.2.6]: docs/06-delivery/versions/v0.2.6.md

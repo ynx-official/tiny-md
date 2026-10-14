@@ -1,4 +1,4 @@
-//! Bounded CPU caches shared by all editor windows for this application session.
+//! Bounded weak registries share active diagrams without owning idle image data.
 use crate::diagrams::{Diagram, DiagramKey, RasterSize};
 use gpui::{App, Global, Image, ImageId, RenderImage, Window};
 use std::{
@@ -7,10 +7,8 @@ use std::{
     sync::{Arc, Mutex, Weak},
 };
 
-const SVG_BUDGET: usize = 16 * 1024 * 1024;
-// The complete 35-diagram reference document uses about 293 MiB at 200% DPI.
-// Keep it reusable after valid END/labelled-chain diagrams no longer fail.
-const PIXEL_BUDGET: usize = 384 * 1024 * 1024;
+// Account for source keys/SVG references, never reserve or retain CPU pixels.
+const REFERENCE_BUDGET: usize = 16 * 1024 * 1024;
 const ENTRY_LIMIT: usize = 128;
 
 type RequestMap<K> = Mutex<HashMap<K, Weak<RequestGate<K>>>>;
@@ -116,6 +114,11 @@ impl<K: Eq + Hash + Clone, V: Clone> Lru<K, V> {
         Some(entry.value.clone())
     }
 
+    fn retain(&mut self, mut keep: impl FnMut(&K, &V) -> bool) {
+        self.entries.retain(|key, entry| keep(key, &entry.value));
+        self.bytes = self.entries.values().map(|entry| entry.bytes).sum();
+    }
+
     fn insert(&mut self, key: K, value: V, bytes: usize) -> Vec<V> {
         let mut evicted = Vec::new();
         if let Some(old) = self.entries.remove(&key) {
@@ -167,10 +170,10 @@ impl RasterKey {
 }
 
 pub(crate) struct DiagramCache {
-    layouts: Lru<DiagramKey, Result<Diagram, String>>,
-    pixels: Lru<RasterKey, Arc<RenderImage>>,
+    layouts: Lru<DiagramKey, LayoutReference>,
+    pixels: Lru<RasterKey, Weak<RenderImage>>,
     // Atlas removal affects every window. Only the last live view can evict
-    // shared GPU textures; cached idle pixels do not keep textures alive.
+    // shared GPU textures; weak references never keep CPU pixels alive.
     users: HashMap<ImageId, usize>,
     layout_requests: RequestLocks<DiagramKey>,
     raster_requests: RequestLocks<RasterKey>,
@@ -178,11 +181,28 @@ pub(crate) struct DiagramCache {
 
 impl Global for DiagramCache {}
 
+#[derive(Clone)]
+struct LayoutReference {
+    image: Weak<Image>,
+    width: f32,
+    height: f32,
+}
+
+impl LayoutReference {
+    fn upgrade(&self) -> Option<Diagram> {
+        Some(Diagram {
+            image: self.image.upgrade()?,
+            width: self.width,
+            height: self.height,
+        })
+    }
+}
+
 impl Default for DiagramCache {
     fn default() -> Self {
         Self {
-            layouts: Lru::new(SVG_BUDGET, ENTRY_LIMIT),
-            pixels: Lru::new(PIXEL_BUDGET, ENTRY_LIMIT),
+            layouts: Lru::new(REFERENCE_BUDGET, ENTRY_LIMIT),
+            pixels: Lru::new(REFERENCE_BUDGET, ENTRY_LIMIT),
             users: HashMap::new(),
             layout_requests: RequestLocks::default(),
             raster_requests: RequestLocks::default(),
@@ -191,7 +211,12 @@ impl Default for DiagramCache {
 }
 
 pub(crate) fn layout(cx: &mut App, key: &DiagramKey) -> Option<Result<Diagram, String>> {
-    cx.default_global::<DiagramCache>().layouts.get(key)
+    prune_idle(cx);
+    cx.default_global::<DiagramCache>()
+        .layouts
+        .get(key)
+        .and_then(|reference| reference.upgrade())
+        .map(Ok)
 }
 
 pub(crate) fn request_layout(cx: &mut App, key: &DiagramKey) -> Arc<RequestGate<DiagramKey>> {
@@ -203,31 +228,49 @@ pub(crate) fn request_raster(cx: &mut App, key: &RasterKey) -> Arc<RequestGate<R
 }
 
 pub(crate) fn store_layout(cx: &mut App, key: &DiagramKey, result: &Result<Diagram, String>) {
-    let bytes = key.source.len()
-        + match result {
-            Ok(diagram) => diagram.image.bytes().len(),
-            Err(error) => error.len(),
-        };
-    cx.default_global::<DiagramCache>()
-        .layouts
-        .insert(key.clone(), result.clone(), bytes);
+    prune_idle(cx);
+    let layouts = &mut cx.default_global::<DiagramCache>().layouts;
+    if let Ok(diagram) = result {
+        layouts.insert(
+            key.clone(),
+            LayoutReference {
+                image: Arc::downgrade(&diagram.image),
+                width: diagram.width,
+                height: diagram.height,
+            },
+            key.source.len() + std::mem::size_of::<LayoutReference>(),
+        );
+    } else {
+        // The owning editor already preserves its error; closed documents need
+        // no session-long copy of diagnostics or their original source.
+        layouts.retain(|existing, _| existing != key);
+    }
 }
 
 pub(crate) fn pixels(cx: &mut App, key: &RasterKey) -> Option<Arc<RenderImage>> {
-    cx.default_global::<DiagramCache>().pixels.get(key)
+    prune_idle(cx);
+    cx.default_global::<DiagramCache>()
+        .pixels
+        .get(key)
+        .and_then(|image| image.upgrade())
 }
 
 pub(crate) fn store_pixels(cx: &mut App, key: RasterKey, image: Arc<RenderImage>) {
-    let bytes = key.size.bytes() + key.svg.bytes().len();
-    let evicted = cx
-        .default_global::<DiagramCache>()
+    prune_idle(cx);
+    let bytes = key.svg.bytes().len() + std::mem::size_of::<Weak<RenderImage>>();
+    cx.default_global::<DiagramCache>()
         .pixels
-        .insert(key, image, bytes);
-    for image in evicted {
-        if !cx.global::<DiagramCache>().users.contains_key(&image.id) {
-            drop_idle_texture(cx, image);
-        }
-    }
+        .insert(key, Arc::downgrade(&image), bytes);
+}
+
+pub(crate) fn prune_idle(cx: &mut App) {
+    let cache = cx.default_global::<DiagramCache>();
+    // Remove raster keys first: their SVG Arc must not keep an expired layout
+    // registration alive after its last image owner disappears.
+    cache.pixels.retain(|_, image| image.strong_count() != 0);
+    cache
+        .layouts
+        .retain(|_, layout| layout.image.strong_count() != 0);
 }
 
 pub(crate) fn pin(cx: &mut App, image: &Arc<RenderImage>) {
@@ -246,6 +289,9 @@ pub(crate) fn release(cx: &mut App, image: Arc<RenderImage>, window: Option<&mut
         }
         users.remove(&image.id);
     }
+    cx.global_mut::<DiagramCache>()
+        .pixels
+        .retain(|_, cached| cached.upgrade().is_some_and(|cached| cached.id != image.id));
     if let Some(window) = window {
         cx.drop_image(image, Some(window));
     } else {
@@ -264,6 +310,7 @@ fn drop_idle_texture(cx: &mut App, image: Arc<RenderImage>) {
         {
             cx.drop_image(image, None);
         }
+        prune_idle(cx);
     });
 }
 
@@ -272,12 +319,10 @@ pub(crate) fn clear_pixels(cx: &mut App) {
     let entries = std::mem::take(&mut cx.default_global::<DiagramCache>().pixels.entries);
     cx.default_global::<DiagramCache>().pixels.bytes = 0;
     for entry in entries.into_values() {
-        if !cx
-            .global::<DiagramCache>()
-            .users
-            .contains_key(&entry.value.id)
+        if let Some(image) = entry.value.upgrade()
+            && !cx.global::<DiagramCache>().users.contains_key(&image.id)
         {
-            drop_idle_texture(cx, entry.value);
+            drop_idle_texture(cx, image);
         }
     }
 }
@@ -294,6 +339,25 @@ mod tests {
             dark: false,
         })
         .unwrap()
+    }
+
+    #[gpui::test]
+    fn idle_svg_layout_releases_after_its_last_owner_drops(cx: &mut TestAppContext) {
+        let key = DiagramKey {
+            source: "flowchart LR\nA --> B".into(),
+            dark: false,
+        };
+        let diagram = diagram();
+        let svg = Arc::downgrade(&diagram.image);
+        cx.update(|cx| store_layout(cx, &key, &Ok(diagram.clone())));
+        assert!(cx.update(|cx| layout(cx, &key).is_some()));
+        drop(diagram);
+        cx.update(|_| ());
+        assert!(
+            svg.upgrade().is_none(),
+            "the shared registry must not own an idle SVG"
+        );
+        assert!(cx.update(|cx| layout(cx, &key).is_none()));
     }
 
     #[gpui::test]

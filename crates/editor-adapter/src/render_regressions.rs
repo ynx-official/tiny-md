@@ -3,7 +3,7 @@ use gpui::TestAppContext;
 use gpui::{EntityInputHandler, ScrollDelta, ScrollWheelEvent, size};
 
 #[gpui::test]
-fn diagram_cache_reopening_a_document_reuses_svg_without_layout_work(cx: &mut TestAppContext) {
+fn diagram_document_reopening_regenerates_after_releasing_idle_images(cx: &mut TestAppContext) {
     cx.update(|cx| guise::Theme::light().init(cx));
     let text = std::env::var_os("TINY_MD_DIAGRAM_DOCUMENT")
         .map(|path| std::fs::read_to_string(path).expect("read diagram document"))
@@ -39,7 +39,7 @@ fn diagram_cache_reopening_a_document_reuses_svg_without_layout_work(cx: &mut Te
                     dark: false,
                 };
                 let state = match &editor.diagrams[&key] {
-                    DiagramState::Ready(diagram) => Ok(diagram.image.clone()),
+                    DiagramState::Ready(diagram) => Ok(std::sync::Arc::downgrade(&diagram.image)),
                     DiagramState::Error(error) => Err(error.clone()),
                     _ => panic!("initial diagrams must finish"),
                 };
@@ -47,34 +47,79 @@ fn diagram_cache_reopening_a_document_reuses_svg_without_layout_work(cx: &mut Te
                     key,
                     state,
                     editor.diagram_views[&block.start].preview_id(cx),
+                    editor.diagram_views[&block.start].preview_reference(cx),
                 )
             })
             .collect::<Vec<_>>()
     });
     let capacity = cx.update(|_, cx| crate::diagram_work::layout(cx));
-    let _permit = crate::diagram_work::occupy(&capacity);
-    let raster_capacity = cx.update(|_, cx| crate::diagram_work::raster(cx));
-    let _raster_permit = crate::diagram_work::occupy(&raster_capacity);
+    let permits = crate::diagram_work::occupy(&capacity);
+    assert_eq!(permits.len(), crate::diagram_work::MAX_CONCURRENT);
+    let retained_bytes = || {
+        let mut unique = std::collections::HashSet::new();
+        originals
+            .iter()
+            .filter_map(|(_, _, _, pixels)| pixels.as_ref()?.upgrade())
+            .filter(|pixels| unique.insert(pixels.id))
+            .map(|pixels| pixels.as_bytes(0).unwrap().len())
+            .sum::<usize>()
+    };
+    let open_bytes = retained_bytes();
     editor.update(cx, |editor, cx| editor.set_text("Another document", cx));
     draw(cx);
+    draw(cx);
+    let idle_bytes = retained_bytes();
+    println!(
+        "diagram_idle_memory: diagrams={} active_pixel_mib={:.2} retired_pixel_mib={:.2}",
+        originals.len(),
+        open_bytes as f64 / 1_048_576.0,
+        idle_bytes as f64 / 1_048_576.0
+    );
+    assert_eq!(
+        idle_bytes, 0,
+        "switching documents must not retain idle CPU pixels"
+    );
+    assert!(
+        originals.iter().all(|(_, svg, _, _)| match svg {
+            Ok(svg) => svg.upgrade().is_none(),
+            Err(_) => true,
+        }),
+        "switching documents must release unowned SVG data too"
+    );
     editor.update(cx, |editor, cx| editor.set_text(&text, cx));
     draw(cx);
     draw(cx);
     cx.read(|cx| {
         let editor = editor.read(cx);
+        for (key, _, _, _) in &originals {
+            assert!(
+                matches!(editor.diagrams[key], DiagramState::Loading { .. }),
+                "reopening a retired diagram must schedule fresh layout work"
+            );
+        }
+        assert_eq!(editor.text(), text);
+    });
+    drop(permits);
+    for _ in 0..3 {
+        cx.background_executor
+            .advance_clock(std::time::Duration::from_millis(1000));
+        draw(cx);
+    }
+    cx.read(|cx| {
+        let editor = editor.read(cx);
         let blocks = editor.document_cache.current().unwrap();
-        for ((key, original, image_id), block) in originals.iter().zip(blocks.code.iter().filter(|block| block.is_mermaid())) {
+        for ((key, original, image_id, _), block) in originals.iter().zip(blocks.code.iter().filter(|block| block.is_mermaid())) {
             match (original, &editor.diagrams[key]) {
-                (Ok(original), DiagramState::Ready(diagram)) => {
-                    assert!(std::sync::Arc::ptr_eq(original, &diagram.image));
+                (Ok(_), DiagramState::Ready(_)) => {
                     assert!(image_id.is_some(), "initial valid diagrams must have pixels");
-                    assert_eq!(editor.diagram_views[&block.start].preview_id(cx), *image_id, "warm reopening must reuse every bitmap while decoder capacity is occupied");
+                    assert!(editor.diagram_views[&block.start].preview_id(cx).is_some(), "all diagrams, including offscreen rows, must regenerate their pixels");
+                    assert_ne!(editor.diagram_views[&block.start].preview_id(cx), *image_id, "retired pixels must be newly decoded");
                 }
                 (Err(original), DiagramState::Error(error)) => assert_eq!(original, error),
-                _ => panic!("reopening unchanged source must hit memory immediately"),
+                _ => panic!("reopening must regenerate the same diagram or error"),
             }
         }
-        println!("memory_cache_reopen: diagrams={} bitmaps={} background_layout_and_raster_capacity_occupied=true", originals.len(), originals.iter().filter(|(_, state, _)| state.is_ok()).count());
+        println!("diagram_idle_reopen: diagrams={} bitmaps={} max_concurrent={} all_offscreen_previews_retained=true", originals.len(), originals.iter().filter(|(_, state, _, _)| state.is_ok()).count(), crate::diagram_work::MAX_CONCURRENT);
         assert_eq!(editor.text(), text);
     });
 }

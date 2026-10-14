@@ -591,6 +591,12 @@ impl EventEmitter<MarkdownEditorEvent> for MarkdownEditor {}
 
 impl MarkdownEditor {
     pub fn new(cx: &mut Context<Self>) -> Self {
+        cx.on_release(|_, cx| {
+            // Wait until this editor's diagrams/tasks and child views have
+            // dropped before pruning their weak source registrations.
+            cx.defer(crate::diagram_cache::prune_idle);
+        })
+        .detach();
         if !cx.has_global::<EditorKeyBindings>() {
             cx.bind_keys([
                 gpui::KeyBinding::new("tab", EditorTab, Some("TinyMdMarkdown")),
@@ -1937,6 +1943,7 @@ impl MarkdownEditor {
         // cannot replace a newer source or the other theme's preview.
         self.diagrams
             .retain(|key, _| all_keys.iter().flatten().any(|current| current == key));
+        crate::diagram_cache::prune_idle(cx);
         for key in all_keys.iter().flatten() {
             if self.diagrams.contains_key(key) {
                 continue;

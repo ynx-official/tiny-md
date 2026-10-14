@@ -108,6 +108,13 @@ fn elk_layout(
     let mut options = json!({
         "elk.algorithm": "layered", "elk.direction": direction_name(graph.direction),
         "elk.hierarchyHandling": "INCLUDE_CHILDREN", "elk.edgeRouting": "ORTHOGONAL",
+        // Follow directed paths from source nodes before breaking cycles. The
+        // greedy default can reverse a main-process edge just because its end
+        // has many outgoing branches, placing a late decision above the start.
+        // DFS preserves acyclic dependencies even when declarations are reordered.
+        "elk.layered.cycleBreaking.strategy": "DEPTH_FIRST",
+        "elk.layered.feedbackEdges": true,
+        "elk.layered.considerModelOrder.strategy": "NODES_AND_EDGES",
         "elk.spacing.nodeNode": config.node_spacing,
         "elk.layered.spacing.nodeNodeBetweenLayers": config.rank_spacing,
         "elk.padding": "[top=24,left=24,bottom=24,right=24]",
@@ -494,6 +501,121 @@ fn merge_edge_style(style: &mut EdgeStyleOverride, overrides: &EdgeStyleOverride
 mod tests {
     use super::*;
     use mermaid_rs_renderer::parse_mermaid_strict;
+
+    #[test]
+    fn project_gates_keep_the_forward_process_in_reading_order() {
+        let source = include_str!("../../../fixtures/diagrams/project-gates.mmd");
+        for (direction, horizontal, sign) in [
+            ("TD", false, 1.0),
+            ("BT", false, -1.0),
+            ("LR", true, 1.0),
+            ("RL", true, -1.0),
+        ] {
+            let parsed = crate::mermaid_parse::parse(&source.replacen("TD", direction, 1)).unwrap();
+            let (output, backend) = layout(
+                &parsed.graph,
+                &Theme::modern(),
+                &LayoutConfig::default(),
+                None,
+            );
+            assert_eq!(backend, Backend::Elk);
+            assert_eq!(output.nodes.len(), 14);
+            assert_eq!(output.edges.len(), 18);
+            for pair in ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "N"].windows(2) {
+                let (a, b) = (&output.nodes[pair[0]], &output.nodes[pair[1]]);
+                let (start, end) = if horizontal {
+                    (a.x + a.width / 2.0, b.x + b.width / 2.0)
+                } else {
+                    (a.y + a.height / 2.0, b.y + b.height / 2.0)
+                };
+                assert!(
+                    (end - start) * sign > 0.0,
+                    "{direction}: {} must precede {} (positions {start}, {end})",
+                    pair[0],
+                    pair[1]
+                );
+            }
+            for (edge, original) in output.edges.iter().zip(&parsed.graph.edges) {
+                assert_eq!((&edge.from, &edge.to), (&original.from, &original.to));
+                assert_eq!(edge.arrow_end, original.arrow_end);
+                assert!(edge.points.len() >= 2);
+                if original.label.is_some() {
+                    assert!(edge.label.is_some() && edge.label_anchor.is_some());
+                }
+                if matches!(
+                    (edge.from.as_str(), edge.to.as_str()),
+                    ("J", "F" | "B") | ("N", "K" | "B")
+                ) {
+                    for segment in edge.points.windows(2) {
+                        for node in output.nodes.values() {
+                            if node.id == edge.from || node.id == edge.to {
+                                continue;
+                            }
+                            let [(x1, y1), (x2, y2)] = [segment[0], segment[1]];
+                            let crosses_vertical = (x1 - x2).abs() < 0.01
+                                && x1 > node.x + 0.01
+                                && x1 < node.x + node.width - 0.01
+                                && y1.max(y2) > node.y + 0.01
+                                && y1.min(y2) < node.y + node.height - 0.01;
+                            let crosses_horizontal = (y1 - y2).abs() < 0.01
+                                && y1 > node.y + 0.01
+                                && y1 < node.y + node.height - 0.01
+                                && x1.max(x2) > node.x + 0.01
+                                && x1.min(x2) < node.x + node.width - 0.01;
+                            assert!(
+                                !crosses_vertical && !crosses_horizontal,
+                                "{direction}: feedback {} -> {} crosses {}",
+                                edge.from,
+                                edge.to,
+                                node.id
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn cycles_without_a_source_and_self_loops_remain_complete() {
+        let parsed = crate::mermaid_parse::parse(
+            "flowchart TD\nA --> B\nB --> C\nC --> A\nB -->|重试| B\nX --> Y\nY --> X",
+        )
+        .unwrap();
+        let (output, backend) = layout(
+            &parsed.graph,
+            &Theme::modern(),
+            &LayoutConfig::default(),
+            None,
+        );
+        assert_eq!(backend, Backend::Elk);
+        assert_eq!(output.nodes.len(), 5);
+        assert_eq!(output.edges.len(), 6);
+        assert!(output.nodes["A"].y < output.nodes["B"].y);
+        assert!(output.nodes["B"].y < output.nodes["C"].y);
+        assert!(output.edges.iter().all(|edge| edge.points.len() >= 2));
+        let retry = &output.edges[3];
+        assert_eq!((&retry.from, &retry.to), (&"B".into(), &"B".into()));
+        assert_eq!(retry.label.as_ref().unwrap().lines.join(""), "重试");
+        assert!(retry.label_anchor.is_some());
+    }
+
+    #[test]
+    fn declaration_order_does_not_reverse_an_acyclic_process() {
+        let parsed = crate::mermaid_parse::parse(
+            "flowchart TD\nC[完成]\nB[处理]\nA[开始]\nA --> B\nB --> C",
+        )
+        .unwrap();
+        let output = elk_layout(
+            &parsed.graph,
+            &Theme::modern(),
+            &LayoutConfig::default(),
+            None,
+        )
+        .unwrap();
+        assert!(output.nodes["A"].y < output.nodes["B"].y);
+        assert!(output.nodes["B"].y < output.nodes["C"].y);
+    }
 
     #[test]
     fn isolated_subgraph_retains_its_explicit_direction() {
