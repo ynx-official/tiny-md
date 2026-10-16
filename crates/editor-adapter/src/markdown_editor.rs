@@ -75,6 +75,11 @@ gpui::actions!(tiny_md_editor, [EditorTab, EditorTabPrevious]);
 struct EditorKeyBindings;
 impl gpui::Global for EditorKeyBindings {}
 
+#[path = "editor_images.rs"]
+mod editor_images;
+#[cfg(test)]
+#[path = "image_regressions.rs"]
+mod image_regressions;
 #[path = "editor_layers.rs"]
 mod layers;
 #[path = "platform_input.rs"]
@@ -169,6 +174,7 @@ struct RowKey {
     hidden: bool,
     code_edges: u8,
     preview: u32,
+    image_preview: u32,
 }
 
 #[derive(Default)]
@@ -591,13 +597,15 @@ pub struct MarkdownEditor {
     diagram_was_dragging: bool,
     code_highlights: syntax::Cache,
     copied_block: Option<usize>,
+    images: editor_images::Images,
 }
 
 impl EventEmitter<MarkdownEditorEvent> for MarkdownEditor {}
 
 impl MarkdownEditor {
     pub fn new(cx: &mut Context<Self>) -> Self {
-        cx.on_release(|_, cx| {
+        cx.on_release(|this, cx| {
+            this.images.clear(cx);
             // Wait until this editor's diagrams/tasks and child views have
             // dropped before pruning their weak source registrations.
             cx.defer(crate::diagram_cache::prune_idle);
@@ -671,6 +679,7 @@ impl MarkdownEditor {
             diagram_was_dragging: false,
             code_highlights: syntax::Cache::default(),
             copied_block: None,
+            images: editor_images::Images::default(),
         }
     }
 
@@ -772,6 +781,7 @@ impl MarkdownEditor {
 
     /// Replace the document, resetting cursor, selection, and history.
     pub fn set_text(&mut self, value: &str, cx: &mut Context<Self>) {
+        self.images.clear(cx);
         self.caret.reset();
         self.copied_block = None;
         self.diagrams.clear();
@@ -1929,7 +1939,6 @@ impl MarkdownEditor {
         } else {
             parsed.tables.as_slice()
         };
-        let table_widths = &self.table_widths;
         let table_membership: Vec<_> = parsed
             .table_membership
             .iter()
@@ -2111,6 +2120,9 @@ impl MarkdownEditor {
                 None => 0.0,
             })
             .collect::<Vec<_>>();
+        self.sync_images(&parsed.images, cx);
+        let image_heights = self.image_heights(&parsed.images, wrap_total, dragging);
+        let table_widths = &self.table_widths;
         let mode = usize::from(self.source_mode);
         let layout_style = LayoutStyle {
             font: prose.clone(),
@@ -2161,10 +2173,14 @@ impl MarkdownEditor {
                     .position(|range| cursor_byte <= range.end)
                     .unwrap_or(ranges.len().saturating_sub(1))
             });
-            let hidden = code_index.is_some_and(|index| {
-                !expanded[index]
-                    && (blocks[index].is_mermaid() || matches!(block, Block::Fence { .. }))
-            });
+            let image_height: f32 = image_heights[i].iter().sum();
+            let hidden = (!self.source_mode
+                && !reveal
+                && parsed.images[i].iter().any(|image| image.standalone))
+                || code_index.is_some_and(|index| {
+                    !expanded[index]
+                        && (blocks[index].is_mermaid() || matches!(block, Block::Fence { .. }))
+                });
             // Keep explicit blank runs and document-edge typing space full-height.
             // Neighbor-dependent spacing belongs in the key: inserting a blank
             // can change the height of an otherwise unchanged cached row.
@@ -2194,6 +2210,7 @@ impl MarkdownEditor {
                         | (u8::from(i == tables[index].start + 1) << 3)
                 }),
                 preview: code_index.map_or(0, |index| preview_heights[index].to_bits()),
+                image_preview: image_height.to_bits(),
             };
             if let Some(row) = self.mode_layouts[mode].rows.get(i, &key) {
                 row.y.set(y);
@@ -2475,6 +2492,7 @@ impl MarkdownEditor {
                         + 20.0;
                 }
             }
+            row.height += image_height;
             y += row.height;
             rows.push(self.mode_layouts[mode].rows.insert(i, key, row));
         }
@@ -2526,6 +2544,18 @@ impl MarkdownEditor {
                 .map(|t| f32::from(t.font_size()))
                 .unwrap_or(base);
             let mut el = div().relative().w_full().h(px(row.height));
+            if !image_heights[i].is_empty() {
+                el = el.child(self.image_elements(
+                    i,
+                    &parsed.images[i],
+                    &image_heights[i],
+                    wrap_total,
+                    row.height,
+                    rule_color,
+                    dimmed,
+                    cx,
+                ));
+            }
             if self.focus_mode
                 && i != cursor.line
                 && !selection.is_some_and(|(start, end)| i >= start.line && i <= end.line)

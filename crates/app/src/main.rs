@@ -439,11 +439,13 @@ impl TinyMd {
         })
         .detach();
         let editor = cx.new(|cx| {
-            MarkdownEditor::new(cx)
+            let mut editor = MarkdownEditor::new(cx)
                 .value(text)
                 .font_size(16.0)
                 .placeholder("从一个想法开始……")
-                .style(editor_style(dark))
+                .style(editor_style(dark));
+            editor.set_document_path(document.path(), cx);
+            editor
         });
         let scroll = editor.read(cx).scroll_handle();
         let mut scroll_offset = scroll.offset();
@@ -696,8 +698,10 @@ impl TinyMd {
         if let Some(path) = self.document.path() {
             remember(path, cx);
         }
-        self.editor
-            .update(cx, |editor, cx| editor.set_text(text, cx));
+        self.editor.update(cx, |editor, cx| {
+            editor.set_document_path(self.document.path(), cx);
+            editor.set_text(text, cx);
+        });
         self.update_analysis(text);
         self.dirty = false;
         self.error = false;

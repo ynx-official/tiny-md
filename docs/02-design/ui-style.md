@@ -1,13 +1,17 @@
 # 原生应用 UI 风格
 
 - 状态：Review
-- 最后更新：2026-10-14
+- 最后更新：2026-10-16
 - 关联文档：[项目约定](../../AGENTS.md)、[Windows 说明](../05-operations/windows.md)、[验证记录](../verification.md)
 
 用户于 2026-10-08 选择 `awesome-design-md` 的 `notion` 风格。来源为本地
 `VoltAgent/awesome-design-md`，权威参考为
 `C:/Users/Administrator/.codex/skills/awesome-design-md/references/design-md/notion/DESIGN.md`。
 项目的 Style ID 与参考路径记录在根目录 `AGENTS.md`。
+
+2026-10-16 普通图片预览沿用正文宽度与既有深浅色，等比缩小且小图不放大。
+加载 / 失败提示使用主题文字、细边线和 6 px 圆角；成功后直接显示图片，不增加装饰卡片。
+编辑、源码切换与资源规则见[图片内嵌预览](../04-quality/inline-images.md)。
 
 用户随后提供 Typora Windows 截图，确认采用左侧应用图标与标题、顶部菜单、空白编辑区及底部视图按钮。
 保留已有居中正文、默认隐藏排版工具栏与侧栏的写作布局，将风格应用于 Windows

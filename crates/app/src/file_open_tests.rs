@@ -31,6 +31,45 @@ pub(super) fn assert_opened(cx: &App, path: &Path, text: &str) {
 }
 
 #[gpui::test]
+fn markdown_image_base_tracks_open_switch_save_as_and_new_document(cx: &mut TestAppContext) {
+    init(cx);
+    let directory = tempfile::tempdir().unwrap();
+    let first = note(directory.path(), "first.md", "![图](image.png)");
+    let second = note(directory.path(), "second.md", "second");
+    let saved = directory.path().join("saved.md");
+    let (view, cx) = cx.add_window_view(|window, cx| TinyMd::new(Some(first.clone()), window, cx));
+    cx.read(|cx| {
+        assert_eq!(
+            view.read(cx).editor.read(cx).document_path(),
+            Some(first.as_path())
+        )
+    });
+    cx.update(|window, cx| {
+        view.update(cx, |this, cx| {
+            let (document, text) = Document::open(&second).unwrap();
+            this.install(document, &text, window, cx);
+            assert_eq!(this.editor.read(cx).document_path(), Some(second.as_path()));
+            this.write(Some(saved.clone()), None, window, cx);
+        });
+    });
+    cx.run_until_parked();
+    cx.read(|cx| {
+        let view = view.read(cx);
+        assert_eq!(view.editor.read(cx).document_path(), view.document.path());
+        assert_eq!(
+            std::fs::canonicalize(view.editor.read(cx).document_path().unwrap()).unwrap(),
+            std::fs::canonicalize(&saved).unwrap()
+        );
+    });
+    cx.update(|window, cx| {
+        view.update(cx, |this, cx| {
+            this.install(Document::untitled(""), "", window, cx);
+            assert_eq!(this.editor.read(cx).document_path(), None);
+        });
+    });
+}
+
+#[gpui::test]
 fn opening_another_note_preserves_the_current_document(cx: &mut TestAppContext) {
     init(cx);
     let directory = tempfile::tempdir().unwrap();

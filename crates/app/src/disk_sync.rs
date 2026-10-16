@@ -113,6 +113,7 @@ impl TinyMd {
         self.document = document;
         self.external_conflict = false;
         self.editor.update(cx, |editor, cx| {
+            editor.set_document_path(self.document.path(), cx);
             editor.apply_external_text(text, cx);
         });
         self.dirty = self.document.is_dirty(text);

@@ -17,6 +17,7 @@ mod editmenu;
 mod external_text;
 mod ime;
 mod markdown_editor;
+mod markdown_images;
 mod mermaid_parse;
 mod render_cache;
 mod syntax;

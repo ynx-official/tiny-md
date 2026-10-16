@@ -3,6 +3,20 @@ use gpui::TestAppContext;
 use gpui::{EntityInputHandler, ScrollDelta, ScrollWheelEvent, size};
 
 #[gpui::test]
+fn markdown_image_preview_is_present_in_formatted_mode(cx: &mut TestAppContext) {
+    cx.update(|cx| guise::Theme::light().init(cx));
+    let source = "![方案阅读方式对比](../02-design/assets/comparison.png)";
+    let (editor, cx) =
+        cx.add_window_view(|_, cx| MarkdownEditor::new(cx).value(source).read_only(true));
+    draw(cx);
+    assert!(
+        cx.debug_bounds("markdown-image").is_some(),
+        "formatted images need a preview or an explicit loading/error state"
+    );
+    assert_eq!(cx.read(|cx| editor.read(cx).text()), source);
+}
+
+#[gpui::test]
 fn diagram_document_reopening_regenerates_after_releasing_idle_images(cx: &mut TestAppContext) {
     cx.update(|cx| guise::Theme::light().init(cx));
     let text = std::env::var_os("TINY_MD_DIAGRAM_DOCUMENT")

@@ -13,6 +13,7 @@ use std::{
 
 pub(crate) struct ParsedDocument {
     pub lines: Vec<String>,
+    pub images: Vec<Vec<crate::markdown_images::ImageLink>>,
     pub blocks: Vec<Block>,
     pub languages: Vec<Option<String>>,
     pub tables: Vec<Table>,
@@ -49,6 +50,7 @@ impl ParsedDocument {
         let source_signatures = source_tokens.iter().map(fingerprint).collect();
         Self {
             lines: lines.to_vec(),
+            images: crate::markdown_images::collect(lines),
             blocks,
             languages,
             tables,
