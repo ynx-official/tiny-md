@@ -3,7 +3,7 @@
 面向用户的精简摘要；完整说明、兼容性、已知问题和验证依据见
 [版本总览](docs/06-delivery/versions/index.md)。版本正文只维护在对应版本详情中。
 
-## [0.2.12] - 2026-10-16
+## [0.2.13] - 2026-10-16
 
 ### 新增
 
@@ -147,7 +147,7 @@
 - 首次提供 macOS Apple Silicon DMG 和 Windows x64 安装包。
 - 原生 Markdown 写作窗口与基本文档操作。
 
-[0.2.12]: docs/06-delivery/versions/v0.2.12.md
+[0.2.13]: docs/06-delivery/versions/v0.2.13.md
 [0.2.11]: docs/06-delivery/versions/v0.2.11.md
 [0.2.10]: docs/06-delivery/versions/v0.2.10.md
 [0.2.9]: docs/06-delivery/versions/v0.2.9.md

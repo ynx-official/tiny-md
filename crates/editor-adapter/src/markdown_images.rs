@@ -231,7 +231,7 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<Arc<RenderImage>, String> {
         let mut buffer = image::RgbaImage::from_raw(size.width(), size.height(), pixmap.take())
             .ok_or("图片解码失败")?;
         // RESVG emits premultiplied RGBA; GPUI expects straight BGRA.
-        for pixel in buffer.chunks_exact_mut(4) {
+        for pixel in buffer.as_chunks_mut::<4>().0.iter_mut() {
             let alpha = pixel[3] as f32 / 255.0;
             if alpha > 0.0 {
                 for channel in &mut pixel[..3] {
@@ -242,7 +242,7 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<Arc<RenderImage>, String> {
         }
         return Ok(Arc::new(RenderImage::new(vec![image::Frame::new(buffer)])));
     };
-    for pixel in buffer.chunks_exact_mut(4) {
+    for pixel in buffer.as_chunks_mut::<4>().0.iter_mut() {
         pixel.swap(0, 2);
     }
     Ok(Arc::new(RenderImage::new(vec![image::Frame::new(buffer)])))
