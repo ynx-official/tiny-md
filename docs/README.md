@@ -36,6 +36,7 @@
 | [v0.2.9 版本详情](06-delivery/versions/v0.2.9.md) | ELK 与流程图加载优化、Mermaid 兼容修复及本次跳过测试的发布记录 |
 | [v0.2.10 版本详情](06-delivery/versions/v0.2.10.md) | 流程图闲置缓存回收与多循环主线布局优化 |
 | [v0.2.11 版本详情](06-delivery/versions/v0.2.11.md) | 大纲章节定位与侧栏当前文档定位 |
+| [v0.2.12 版本详情](06-delivery/versions/v0.2.12.md) | Markdown 本地与远程图片内嵌预览 |
 | [v0.2.8 未发布记录](99-archive/v0.2.8-failed-release.md) | CI Clippy 失败、未公开 Release 与替代版本 |
 | [v0.2.7 版本详情](06-delivery/versions/v0.2.7.md) | 双平台段落空行修复与本次跳过测试的发布记录 |
 | [v0.2.6 版本详情](06-delivery/versions/v0.2.6.md) | Windows 段落空行间距修复与本次跳过测试的发布记录 |
