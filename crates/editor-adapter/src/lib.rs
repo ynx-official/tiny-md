@@ -22,6 +22,7 @@ mod markdown_images;
 mod mermaid_parse;
 mod render_cache;
 mod shaped_text;
+mod svg_fonts;
 mod syntax;
 mod tables;
 mod unicode;

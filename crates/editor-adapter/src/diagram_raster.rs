@@ -12,6 +12,23 @@ const FONT_FAMILIES: &[&str] = if cfg!(target_os = "windows") {
     &["Helvetica Neue", "PingFang SC"]
 };
 
+fn read_font_bytes(file: std::fs::File, budget: usize) -> Option<Vec<u8>> {
+    let length = usize::try_from(file.metadata().ok()?.len()).ok()?;
+    if length > budget {
+        return None;
+    }
+    // Leave one byte for the EOF probe so read_to_end does not double a full
+    // buffer. Still bound the read if the file grows after the metadata check.
+    let mut data = Vec::with_capacity(length.checked_add(1)?);
+    file.take(budget as u64 + 1).read_to_end(&mut data).ok()?;
+    if data.len() > budget {
+        return None;
+    }
+    // fontdb retains the Vec as-is. A boxed slice removes spare capacity before
+    // it becomes a process-lifetime cache, with an exact length/capacity on return.
+    Some(data.into_boxed_slice().into_vec())
+}
+
 fn retain_font_bytes(db: &mut Database, budget: usize) -> usize {
     let mut paths = std::collections::BTreeSet::new();
     for family in FONT_FAMILIES {
@@ -37,29 +54,16 @@ fn retain_font_bytes(db: &mut Database, budget: usize) -> usize {
         let Ok(file) = std::fs::File::open(&path) else {
             continue;
         };
-        if file
-            .metadata()
-            .ok()
-            .is_none_or(|metadata| metadata.len() > remaining as u64)
-        {
+        let Some(data) = read_font_bytes(file, remaining) else {
             continue;
-        }
-        let mut data = Vec::new();
-        if file
-            .take(remaining as u64 + 1)
-            .read_to_end(&mut data)
-            .is_err()
-            || data.len() > remaining
-        {
-            continue;
-        }
+        };
         let ids = db
             .faces()
             .filter(|face| matches!(&face.source, Source::File(source) if source == &path))
             .map(|face| face.id)
             .collect::<Vec<_>>();
         let previous = db.len();
-        let bytes = data.len();
+        let bytes = data.capacity();
         db.load_font_data(data);
         if db.len() > previous {
             // Replace file-backed faces only after the same bytes parse. Keep
@@ -75,9 +79,13 @@ fn retain_font_bytes(db: &mut Database, budget: usize) -> usize {
 
 pub(crate) fn options() -> &'static usvg::Options<'static> {
     static OPTIONS: LazyLock<usvg::Options<'static>> = LazyLock::new(|| {
-        let mut options = usvg::Options::default();
+        let mut options = usvg::Options {
+            fontdb: crate::svg_fonts::system_fonts(),
+            ..Default::default()
+        };
         let db = options.fontdb_mut();
-        db.load_system_fonts();
+        // Promote only the diagram database; ordinary SVG images keep the
+        // shared file-backed index and do not inherit this warm byte cache.
         retain_font_bytes(db, FONT_BYTES_LIMIT);
         options
     });
@@ -113,6 +121,24 @@ pub(crate) fn decode(diagram: &Diagram, size: RasterSize) -> Result<Arc<RenderIm
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn font_cache_allocation_fits_budget_without_retaining_spare_capacity() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let bytes = vec![0x5a; 65_537];
+        std::fs::write(file.path(), &bytes).unwrap();
+        let data = read_font_bytes(std::fs::File::open(file.path()).unwrap(), bytes.len()).unwrap();
+        assert_eq!(data, bytes);
+        assert!(
+            data.capacity() <= bytes.len(),
+            "{} bytes retained for a {} byte budget",
+            data.capacity(),
+            bytes.len()
+        );
+        assert!(
+            read_font_bytes(std::fs::File::open(file.path()).unwrap(), bytes.len() - 1).is_none()
+        );
+    }
 
     #[test]
     fn installed_primary_fonts_are_shared_bytes_with_a_fixed_budget() {

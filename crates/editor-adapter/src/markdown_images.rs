@@ -267,36 +267,46 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<Arc<RenderImage>, String> {
         decoded.apply_orientation(orientation);
         decoded.into_rgba8()
     } else {
-        let mut options = usvg::Options::default();
-        options.fontdb = crate::diagram_raster::options().fontdb.clone();
-        // A remote SVG must never read additional local files via <image href>.
-        options.image_href_resolver.resolve_string = Box::new(|_, _| None);
-        options.image_href_resolver.resolve_data = Box::new(|_, _, _| None);
-        let tree = usvg::Tree::from_data(bytes, &options).map_err(|_| "图片损坏或格式不支持")?;
-        let size = tree.size().to_int_size();
-        check_size(size.width(), size.height())?;
-        let mut pixmap =
-            resvg::tiny_skia::Pixmap::new(size.width(), size.height()).ok_or("图片尺寸无效")?;
-        resvg::render(
-            &tree,
-            resvg::tiny_skia::Transform::identity(),
-            &mut pixmap.as_mut(),
-        );
-        let mut buffer = image::RgbaImage::from_raw(size.width(), size.height(), pixmap.take())
-            .ok_or("图片解码失败")?;
-        // RESVG emits premultiplied RGBA; GPUI expects straight BGRA.
-        for pixel in buffer.as_chunks_mut::<4>().0.iter_mut() {
-            let alpha = pixel[3] as f32 / 255.0;
-            if alpha > 0.0 {
-                for channel in &mut pixel[..3] {
-                    *channel = (*channel as f32 / alpha).round() as u8;
-                }
-            }
-            pixel.swap(0, 2);
-        }
-        return Ok(Arc::new(RenderImage::new(vec![image::Frame::new(buffer)])));
+        return decode_svg(bytes, &svg_options());
     };
     for pixel in buffer.as_chunks_mut::<4>().0.iter_mut() {
+        pixel.swap(0, 2);
+    }
+    Ok(Arc::new(RenderImage::new(vec![image::Frame::new(buffer)])))
+}
+
+fn svg_options() -> usvg::Options<'static> {
+    let mut options = usvg::Options {
+        fontdb: crate::svg_fonts::system_fonts(),
+        ..Default::default()
+    };
+    // A remote SVG must never read additional local files via <image href>.
+    options.image_href_resolver.resolve_string = Box::new(|_, _| None);
+    options.image_href_resolver.resolve_data = Box::new(|_, _, _| None);
+    options
+}
+
+fn decode_svg(bytes: &[u8], options: &usvg::Options<'_>) -> Result<Arc<RenderImage>, String> {
+    let tree = usvg::Tree::from_data(bytes, options).map_err(|_| "图片损坏或格式不支持")?;
+    let size = tree.size().to_int_size();
+    check_size(size.width(), size.height())?;
+    let mut pixmap =
+        resvg::tiny_skia::Pixmap::new(size.width(), size.height()).ok_or("图片尺寸无效")?;
+    resvg::render(
+        &tree,
+        resvg::tiny_skia::Transform::identity(),
+        &mut pixmap.as_mut(),
+    );
+    let mut buffer = image::RgbaImage::from_raw(size.width(), size.height(), pixmap.take())
+        .ok_or("图片解码失败")?;
+    // RESVG emits premultiplied RGBA; GPUI expects straight BGRA.
+    for pixel in buffer.as_chunks_mut::<4>().0.iter_mut() {
+        let alpha = pixel[3] as f32 / 255.0;
+        if alpha > 0.0 {
+            for channel in &mut pixel[..3] {
+                *channel = (*channel as f32 / alpha).round() as u8;
+            }
+        }
         pixel.swap(0, 2);
     }
     Ok(Arc::new(RenderImage::new(vec![image::Frame::new(buffer)])))

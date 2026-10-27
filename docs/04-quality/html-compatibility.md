@@ -12,6 +12,8 @@
 
 同日用户要求补齐 `<h3>` 等 HTML 标题；`h1`–`h6` 映射至对应 Markdown 标题的排版规则。
 
+同日用户提供 Typora 截图及 Neutrino Proxy 完整样例，要求独立 `<br/>` 与 `<!-- hello -->` 等无正文内容的语法仍可见、可定位。此要求替代此前预览隐藏所有注释的规则：原生编辑预览显示轻量功能标记，保留原有源码、点击编辑与撤销边界。
+
 沿用 Rust、GPUI 与 Guise。HTML 是编辑器的展示层：先由现有 Markdown AST 识别文本、HTML 与代码边界，再用 `html5gum 0.8.4` 读取标签、已解码属性及源码字节范围。完整实体使用现有 `markdown` 库解码，并单独记录范围。排版结果保留源码到可见文本的映射，不建立可写 DOM，也不把排版结果序列化回文档。
 
 `html.rs` 负责解析与源文映射，`editor_html.rs` 负责原生表格与折叠控件，`shaped_text.rs` 统一硬换行的绘制、点击与光标坐标。它们由 Windows / macOS 共用。图片复用现有加载器及资源限制；平台输入接口、编辑模型、撤销历史和磁盘保存继续使用原有实现。
@@ -21,7 +23,8 @@
 | 类别 | 支持内容 | 展示规则 |
 |---|---|---|
 | 标题 | `h1`–`h6` | 独占源码行的标题使用对应 Markdown 标题字号、字重和留白；支持大小写标签、多行内容、对齐及嵌套文字样式 |
-| 换行 | `br`、`br /` | 正文及 Markdown / HTML 表格内换行 |
+| 换行 | `br`、`br/`、`br /`，大小写均可 | 独占源码行的标签显示淡灰色等宽原文，占一个普通行高；行内及表格内继续实际换行 |
+| 注释 | 完整 `<!-- … -->`，支持多行 | 柔和金色等宽原文，内部 Markdown、标签与实体不解释；可点击、选择、复制及编辑 |
 | 图片 | `img` 的 `src`、`alt`、`width`、`height` | 本地相对路径、原生绝对路径、`file:`、HTTP/HTTPS；尺寸按可用宽度约束 |
 | 基础文字 | `b` / `strong`、`i` / `em`、`s` / `del`、`u`、`mark`、`code`、`kbd`、`sub`、`sup` | 字重、斜体、删除线、下划线、标记、等宽与上下标 |
 | 实体 | `&amp;`、`&lt;`、`&gt;`、`&nbsp;`、命名实体及十进制 / 十六进制数字实体 | 支持完整的 `&…;`；未知或未完成的实体保留原文 |
@@ -36,7 +39,9 @@
 图片宽高支持正数像素值及内联 `style` 中的 `width` / `height` 像素值；仅设置一边时保留比例，设置两边时采用指定比例。
 HTML 表格图片显示在对应单元格内。只包含图片、图片链接、可选 `span`、注释和空白的 `p` / `div` 按图片组横向排版，忽略源码缩进和换行，继承容器对齐，宽度不足时自动折行；`br` 显式换行。各徽章间距为 8 px，加载 / 失败显示占位，滚动条拖动期间冻结组的布局尺寸。图片链接沿用 Ctrl 点击（macOS 为 ⌘ 点击、只读为普通点击）打开规则。
 
-普通点击图片组会展开其源码供编辑，离开后恢复横排。HTML 注释在预览中隐藏，在编辑及源码模式保留。含文字或未知标签的混合容器继续保留原有逐行展示，不把正文吞入图片组；表格单元格暂不合并图片组。不实现通用浏览器的文字与图片行内环绕。
+普通点击图片组会展开其源码供编辑，离开后恢复横排。组内注释随图片组源码隐藏，组外注释作为提示文字显示；折叠正文内的注释与独立换行标记也随正文收起。含文字或未知标签的混合容器继续保留原有逐行展示，不把正文吞入图片组；表格单元格暂不合并图片组。不实现通用浏览器的文字与图片行内环绕。
+
+功能标记沿用项目原生字体和主题：换行标记使用淡灰色，注释使用当前主题的黄色文字色阶（浅色 7、深色 4），不添加边框、背景或额外卡片。点击对应行后进入原有源码编辑样式；退出后恢复提示色。显示出的标签及注释就是原始字符，不是额外插入文档的文字。
 
 图片链接向应用传递原始目标，HTTP/HTTPS 由浏览器打开；`LICENSE` 等其他目标沿用现有应用行为，在状态栏显示链接地址。
 
@@ -78,6 +83,10 @@ Windows 实际执行 `./scripts/check.ps1`：258 项工作区测试、17 项发�
 
 标题扩展新增 5 项回归，其中标题相邻边界测试实际复现了 `甲乙` 未换行的问题，修复后通过；同级 Markdown 尺寸、多行缩进、嵌套样式、缓存刷新、中文组合输入 / 撤销与源码切换均通过。应用保存测试加入大小写混合、引号与实体的 HTML 标题，确认 BOM + CRLF 字节保留。重新执行 `./scripts/check.ps1`：266 项工作区测试（应用 74、文档 16、编辑器 161、更新器 15）、17 项发布工具测试、版本资料、格式与 Clippy 全部通过，忽略项不变。日志：`target/html-headings-workspace-check.log`；输入证据仍为 TestPlatform，未新增系统输入法或 macOS 原生验收。
 
+功能标记调整新增 4 项回归。修复前实际复现独立 `<br/>` 被转换为空换行、注释被隐藏；修复后验证逐字符源文映射、一个普通行高、点击定位、中文组合输入 / 撤销、选择复制、源码切换、代码与转义边界、表格内换行及折叠隐藏。用户整段样例的自动回归保留全部 URL，只在图片加载边界预置尺寸，保证测试不依赖网络；验证 3 个注释、2 个独立换行标记、标题居中及徽章横排。保存测试加入注释和大小写换行标签，继续逐字节验证 BOM + CRLF。`./scripts/check.ps1` 通过 270 项工作区测试（应用 74、文档 16、编辑器 165、更新器 15）、17 项发布工具测试、版本资料、格式与 Clippy；忽略项不变。日志：`target/html-functional-marks-workspace-check.log`。
+
+Windows 最新开发构建已打开完整样例，原生截图确认金色注释、淡灰色换行标记、实际本地 Logo、居中标题及四个远程徽章显示。随后用户按 Esc 停止 Computer Use，界面自动操作已停止；此次不宣称原生点击交互、系统输入法或 macOS 已验收。
+
 检查期间 D 盘空间耗尽导致编译 / 链接中断。可重建的增量编译缓存已暂存至 `C:/Users/Administrator/AppData/Local/Temp/tiny-md-html-build-cache-20261027/`，保留恢复能力；释放空间后完整检查重跑通过。此操作未移动项目源码或文档。
 
 Windows 开发构建已启动示例；原生界面已检查文字样式、上下标、换行、对齐和折叠展开。用户按 Esc 停止 Computer Use 后停止界面自动操作，因此没有完成原生系统输入法、完整表格交互及全部界面验收。自动输入测试使用 GPUI TestPlatform，不能替代系统输入法验收。macOS 本次没有编译或运行证据，共用代码不等于已完成 macOS 原生验收。
@@ -85,6 +94,7 @@ Windows 开发构建已启动示例；原生界面已检查文字样式、上下
 手动检查示例：[HTML 混排检查](../../fixtures/html-compatibility.md)。
 徽章反馈示例：[HTML 徽章混排](../../fixtures/html-badges.md)，使用用户提供的图片地址；实际远程图片是否成功仍取决于网络及上游响应。
 标题反馈示例：[HTML 标题](../../fixtures/html-headings.md)，包含六级标题、居中、嵌套样式、多行内容和源码编辑检查。
+功能标记反馈示例：[用户提供的完整内容](../../fixtures/html-functional-markers.md)。Logo 测试资源复制自本机 `D:/study/neutrino-proxy-client-desktop/assets/logo/logo-text-cross.png`，保留相对路径 `assets/logo/logo-text-cross.png`；远程徽章地址保持用户原文。可运行 `./scripts/run-windows.ps1 -Document './fixtures/html-functional-markers.md'` 检查。
 Windows 可运行 `./scripts/run-windows.ps1 -Document './fixtures/html-compatibility.md'`；macOS 可运行 `cargo run --locked -p tiny-md -- fixtures/html-compatibility.md`。
 
 解析器接口依据：[html5gum DefaultEmitter](https://docs.rs/html5gum/0.8.4/html5gum/emitters/default/struct.DefaultEmitter.html)；块级 HTML 规则依据：[CommonMark HTML blocks](https://spec.commonmark.org/0.31.2/#html-blocks)。

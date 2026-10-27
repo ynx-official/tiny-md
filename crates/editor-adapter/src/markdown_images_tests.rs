@@ -164,6 +164,54 @@ fn markdown_image_decode_load_and_sizing_are_bounded_and_bgra() {
 }
 
 #[test]
+fn ordinary_svg_reuses_font_index_without_preloading_diagram_font_bytes() {
+    let options = svg_options();
+    assert!(
+        !options.fontdb.is_empty(),
+        "font lookup must remain available"
+    );
+    assert!(
+        options
+            .fontdb
+            .faces()
+            .all(|face| !matches!(face.source, usvg::fontdb::Source::Binary(_))),
+        "ordinary SVG images must not retain diagram font bytes"
+    );
+    assert!(
+        Arc::ptr_eq(&options.fontdb, &svg_options().fontdb),
+        "images must share one font index"
+    );
+}
+
+#[test]
+fn ordinary_svg_font_loading_preserves_badges_chinese_and_fallback_pixels() {
+    let mut previous = svg_options();
+    previous.fontdb = crate::diagram_raster::options().fontdb.clone();
+    for (family, text) in [
+        ("Verdana, sans-serif", "version v1.0.0"),
+        ("Microsoft YaHei, PingFang SC, sans-serif", "中文徽章 ✓ ①"),
+        ("not-an-installed-font, sans-serif", "Fallback 中文"),
+    ] {
+        let source = format!(
+            r##"<svg xmlns="http://www.w3.org/2000/svg" width="240" height="36"><text x="4" y="25" font-family="{family}" font-size="16" fill="#555">{text}</text></svg>"##
+        );
+        let expected = decode_svg(source.as_bytes(), &previous).unwrap();
+        let actual = decode(source.as_bytes()).unwrap();
+        assert_eq!(actual.size(0), expected.size(0));
+        assert_eq!(actual.as_bytes(0), expected.as_bytes(0), "{family}");
+        assert!(
+            actual
+                .as_bytes(0)
+                .unwrap()
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .any(|pixel| pixel[3] != 0)
+        );
+    }
+}
+
+#[test]
 fn markdown_image_http_download_redirect_and_error_use_real_transport() {
     let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let base = format!("http://{}", server.local_addr().unwrap());
