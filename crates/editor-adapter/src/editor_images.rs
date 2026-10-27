@@ -19,6 +19,7 @@ pub(super) struct Images {
     pub entries: HashMap<String, State>,
     generation: u64,
     heights: Vec<Vec<f32>>,
+    pub flows: HashMap<(u64, u32), super::image_flow::Layout>,
 }
 
 impl Images {
@@ -29,6 +30,7 @@ impl Images {
             }
         }
         self.heights.clear();
+        self.flows.clear();
         self.generation = self.generation.wrapping_add(1);
     }
 }
@@ -146,7 +148,7 @@ impl MarkdownEditor {
                         }
                         let height = match self.images.entries.get(&link.target) {
                             Some(State::Ready(image)) => {
-                                markdown_images::display_size(image, width).1
+                                markdown_images::display_size_for(image, width, link).1
                             }
                             _ => 96.0,
                         };
@@ -180,7 +182,10 @@ impl MarkdownEditor {
             .top(px(row_height - heights.iter().sum::<f32>()));
         for (index, (link, height)) in links.iter().zip(heights).enumerate() {
             let mut preview = div()
-                .id((SharedString::from(format!("markdown-image-{line}")), index))
+                .id((
+                    SharedString::from(format!("markdown-image-{line}-{}", link.source_offset)),
+                    index,
+                ))
                 .debug_selector(|| "markdown-image".into())
                 .w_full()
                 .h(px(*height))
@@ -189,11 +194,20 @@ impl MarkdownEditor {
                 .overflow_hidden();
             match self.images.entries.get(&link.target) {
                 Some(State::Ready(image)) => {
-                    let (w, h) = markdown_images::display_size(image, width);
+                    let (w, h) = markdown_images::display_size_for(image, width, link);
+                    preview = preview.flex();
+                    preview = match link.align {
+                        1 => preview.justify_center(),
+                        2 => preview.justify_end(),
+                        _ => preview,
+                    };
                     preview = preview.child(
                         gpui::img(image.clone())
                             .id((
-                                SharedString::from(format!("markdown-image-pixels-{line}")),
+                                SharedString::from(format!(
+                                    "markdown-image-pixels-{line}-{}",
+                                    link.source_offset
+                                )),
                                 index,
                             ))
                             .debug_selector(|| "markdown-image-pixels".into())
@@ -234,7 +248,13 @@ impl MarkdownEditor {
                         let target = link.target.clone();
                         message = message.child(
                             div()
-                                .id((SharedString::from(format!("retry-image-{line}")), index))
+                                .id((
+                                    SharedString::from(format!(
+                                        "retry-image-{line}-{}",
+                                        link.source_offset
+                                    )),
+                                    index,
+                                ))
                                 .debug_selector(|| "markdown-image-retry".into())
                                 .cursor_pointer()
                                 .child("重试")
@@ -251,12 +271,22 @@ impl MarkdownEditor {
                     preview = preview.child(message);
                 }
             }
-            if !self.read_only {
+            if !self.read_only || link.href.is_some() {
+                let href = link.href.clone();
                 preview = preview.cursor_pointer().on_mouse_down(
                     MouseButton::Left,
-                    cx.listener(move |this, _, window, cx| {
+                    cx.listener(move |this, event: &MouseDownEvent, window, cx| {
                         cx.stop_propagation();
                         this.finish_composition(cx);
+                        if (this.read_only || event.modifiers.cmd())
+                            && let Some(href) = &href
+                        {
+                            cx.emit(MarkdownEditorEvent::LinkClick(href.clone()));
+                            return;
+                        }
+                        if this.read_only {
+                            return;
+                        }
                         this.model.move_to(line, 0, false);
                         this.caret.reset();
                         window.focus(&this.focus);

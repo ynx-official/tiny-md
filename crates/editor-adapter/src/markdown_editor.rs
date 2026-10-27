@@ -36,16 +36,16 @@ use gpui::{
     ElementInputHandler, Empty, Entity, EntityId, EventEmitter, FocusHandle, Font, FontStyle,
     FontWeight, Hsla, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, Pixels, ScrollHandle,
     SharedString, StrikethroughStyle, StyleRefinement, Task, TextAlign, TextRun, UnderlineStyle,
-    Window, WrappedLine, canvas, div, point, px,
+    Window, canvas, div, point, px,
 };
 use guise::actions;
 use guise::overlay::ContextMenu;
 
+use crate::html::{src_for_vis, vis_for_src};
+use crate::shaped_text::ShapedText;
 use guise::editor::{EditorModel, Pos, TokenKind, token_color};
 use guise::markdown::block::{Block, DocState, classify};
-use guise::markdown::layout::{
-    RowKind, RowPlan, byte_for_col, col_for_byte, metrics, plan, src_for_vis, vis_for_src,
-};
+use guise::markdown::layout::{RowKind, RowPlan, byte_for_col, col_for_byte, metrics};
 use guise::reactive::Signal;
 use guise::theme::theme;
 use guise::{Glyph, IconName};
@@ -75,8 +75,12 @@ gpui::actions!(tiny_md_editor, [EditorTab, EditorTabPrevious]);
 struct EditorKeyBindings;
 impl gpui::Global for EditorKeyBindings {}
 
+#[path = "editor_html.rs"]
+mod editor_html;
 #[path = "editor_images.rs"]
 mod editor_images;
+#[path = "image_flow.rs"]
+mod image_flow;
 #[cfg(test)]
 #[path = "image_regressions.rs"]
 mod image_regressions;
@@ -139,9 +143,10 @@ fn row_padding(kind: &RowKind, compact: bool) -> (f32, f32) {
 /// One laid-out source line: its plan, shaped text, and geometry. Rebuilt
 /// every render; mouse and caret math read the copy from the last frame.
 struct Row {
+    html_table: Option<editor_html::TableLayout>,
     plan: RowPlan,
     /// `Rc` so the paint closure can share the shaped line with the row.
-    text: Option<std::rc::Rc<WrappedLine>>,
+    text: Option<std::rc::Rc<ShapedText>>,
     line_h: f32,
     pad_top: f32,
     inset: f32,
@@ -164,6 +169,7 @@ struct LayoutStyle {
 
 #[derive(Clone, PartialEq)]
 struct RowKey {
+    html: u64,
     block: Block,
     compact_blank: bool,
     code: u64,
@@ -221,11 +227,29 @@ fn shape_table_cell(
     style: &CellStyle,
     window: &mut Window,
 ) -> Row {
-    let plan = tables::cell_plan(source, reveal);
+    let (plan, extras) = if source.contains(['<', '&']) {
+        crate::html::fragment_plan(source, reveal)
+    } else {
+        let p = tables::cell_plan(source, reveal);
+        let extras = vec![crate::html::Style::default(); p.runs.len()];
+        (p, extras)
+    };
+    shape_planned_cell((plan, extras), header, width, alignment, style, window)
+}
+
+fn shape_planned_cell(
+    (plan, extras): (RowPlan, Vec<crate::html::Style>),
+    header: bool,
+    width: f32,
+    alignment: Alignment,
+    style: &CellStyle,
+    window: &mut Window,
+) -> Row {
     let runs = plan
         .runs
         .iter()
-        .map(|run| TextRun {
+        .zip(&extras)
+        .map(|(run, extra)| TextRun {
             len: run.len,
             font: Font {
                 family: if run.style.code {
@@ -250,16 +274,19 @@ fn shape_table_cell(
             } else if run.style.link {
                 style.accent
             } else {
-                style.text
+                extra
+                    .color
+                    .map(|c| gpui::rgb(c).into())
+                    .unwrap_or(style.text)
             },
             background_color: if run.style.highlight {
                 Some(style.highlight_bg)
             } else if run.style.code {
                 Some(style.code_bg)
             } else {
-                None
+                extra.background.map(|c| gpui::rgb(c).into())
             },
-            underline: run.style.link.then(|| UnderlineStyle {
+            underline: (run.style.link || extra.underline).then(|| UnderlineStyle {
                 thickness: px(1.0),
                 color: Some(style.accent),
                 wavy: false,
@@ -274,22 +301,10 @@ fn shape_table_cell(
     let wrap = (width - inset * 2.0).max(8.0);
     let size = (style.base - 1.0).max(12.0);
     let line_h = (size * 1.6).round();
-    let text = window
-        .text_system()
-        .shape_text(
-            SharedString::from(plan.visible.clone()),
-            px(size),
-            &runs,
-            Some(px(wrap)),
-            None,
-        )
-        .ok()
-        .and_then(|mut lines| (!lines.is_empty()).then(|| std::rc::Rc::new(lines.swap_remove(0))));
-    let height = text
-        .as_ref()
-        .map_or(1, |text| text.wrap_boundaries().len() + 1) as f32
-        * line_h;
+    let text = ShapedText::new(&plan.visible, size, &runs, &extras, wrap, window).map(Rc::new);
+    let height = text.as_ref().map_or(1, |text| text.visual_rows()) as f32 * line_h;
     Row {
+        html_table: None,
         plan,
         text,
         line_h,
@@ -317,9 +332,7 @@ impl Row {
                 .max()
                 .unwrap_or(1);
         }
-        self.text
-            .as_ref()
-            .map_or(1, |t| t.wrap_boundaries().len() + 1)
+        self.text.as_ref().map_or(1, |t| t.visual_rows())
     }
 
     /// Byte offsets where the shaped line wraps, ascending.
@@ -327,10 +340,7 @@ impl Row {
         let Some(text) = &self.text else {
             return Vec::new();
         };
-        text.wrap_boundaries()
-            .iter()
-            .map(|b| text.runs()[b.run_ix].glyphs[b.glyph_ix].index)
-            .collect()
+        text.boundaries()
     }
 
     /// End-semantics position for a visible byte: a wrap-boundary byte maps
@@ -513,12 +523,11 @@ impl Row {
             TextAlign::Right => 1.0,
             _ => return 0.0,
         };
-        let boundary = self
-            .boundaries()
-            .get(visual_row)
-            .copied()
-            .unwrap_or(usize::MAX);
-        (self.wrap - self.pos_end_raw(boundary).0).max(0.0) * factor
+        let width = self
+            .text
+            .as_ref()
+            .map_or(0.0, |text| text.visual_width(visual_row));
+        (self.wrap - width).max(0.0) * factor
     }
 
     fn source_at(&self, x: f32, y: f32) -> usize {
@@ -598,6 +607,7 @@ pub struct MarkdownEditor {
     code_highlights: syntax::Cache,
     copied_block: Option<usize>,
     images: editor_images::Images,
+    html_details: std::collections::HashMap<u64, bool>,
 }
 
 impl EventEmitter<MarkdownEditorEvent> for MarkdownEditor {}
@@ -680,6 +690,7 @@ impl MarkdownEditor {
             code_highlights: syntax::Cache::default(),
             copied_block: None,
             images: editor_images::Images::default(),
+            html_details: Default::default(),
         }
     }
 
@@ -781,6 +792,7 @@ impl MarkdownEditor {
 
     /// Replace the document, resetting cursor, selection, and history.
     pub fn set_text(&mut self, value: &str, cx: &mut Context<Self>) {
+        self.html_details.clear();
         self.images.clear(cx);
         self.caret.reset();
         self.copied_block = None;
@@ -2100,6 +2112,97 @@ impl MarkdownEditor {
             all_keys.as_slice()
         };
         let editing_range = selection.map(|(s, e)| (s.line, e.line)).or(reveal_range);
+        self.html_details
+            .retain(|key, _| parsed.html.details.iter().any(|d| d.key == *key));
+        let cursor_offset =
+            parsed.html.offsets[cursor.line] + byte_for_col(&parsed.lines[cursor.line], cursor.col);
+        let details_open: Vec<_> = parsed
+            .html
+            .details
+            .iter()
+            .map(|d| {
+                self.html_details.get(&d.key).copied().unwrap_or(d.open)
+                    || (!self.read_only && focused && d.body.contains(&cursor_offset))
+                    || selection.is_some_and(|(start, end)| {
+                        let start = parsed.html.offsets[start.line]
+                            + byte_for_col(&parsed.lines[start.line], start.col);
+                        let end = parsed.html.offsets[end.line]
+                            + byte_for_col(&parsed.lines[end.line], end.col);
+                        start < d.body.end && end > d.body.start
+                    })
+            })
+            .collect();
+        let mut html_hidden: Vec<_> = if self.source_mode {
+            Vec::new()
+        } else {
+            parsed
+                .html
+                .details
+                .iter()
+                .zip(&details_open)
+                .filter(|(_, open)| !**open)
+                .map(|(d, _)| d.body.clone())
+                .collect()
+        };
+        let html_table_expanded: Vec<_> = parsed
+            .html
+            .tables
+            .iter()
+            .map(|table| {
+                self.source_mode
+                    || editing_range.is_some_and(|(start, end)| {
+                        start <= parsed.html.line(table.range.end.saturating_sub(1))
+                            && end >= parsed.html.line(table.range.start)
+                    })
+            })
+            .collect();
+        let html_table_visible: Vec<_> = parsed
+            .html
+            .tables
+            .iter()
+            .zip(&html_table_expanded)
+            .map(|(table, expanded)| {
+                !expanded
+                    && !html_hidden
+                        .iter()
+                        .any(|range| range.contains(&table.range.start))
+            })
+            .collect();
+        for (table, visible) in parsed.html.tables.iter().zip(&html_table_visible) {
+            if *visible {
+                html_hidden.push(table.range.clone());
+            }
+        }
+        let html_images_expanded: Vec<_> = parsed
+            .html
+            .image_groups
+            .iter()
+            .map(|group| {
+                self.source_mode
+                    || editing_range.is_some_and(|(start, end)| {
+                        start <= parsed.html.line(group.range.end.saturating_sub(1))
+                            && end >= parsed.html.line(group.range.start)
+                    })
+            })
+            .collect();
+        let html_images_visible: Vec<_> = parsed
+            .html
+            .image_groups
+            .iter()
+            .zip(&html_images_expanded)
+            .map(|(group, expanded)| {
+                !expanded
+                    && !html_hidden
+                        .iter()
+                        .any(|range| range.contains(&group.range.start))
+            })
+            .collect();
+        for (group, visible) in parsed.html.image_groups.iter().zip(&html_images_visible) {
+            if *visible {
+                html_hidden.push(group.range.clone());
+            }
+        }
+        let html_visibility_signature = render_cache::fingerprint(&html_hidden);
         let expanded = blocks
             .iter()
             .enumerate()
@@ -2121,7 +2224,54 @@ impl MarkdownEditor {
             })
             .collect::<Vec<_>>();
         self.sync_images(&parsed.images, cx);
-        let image_heights = self.image_heights(&parsed.images, wrap_total, dragging);
+        let image_flows = self.image_flows(
+            &parsed.html,
+            &parsed.images,
+            &html_images_visible,
+            wrap_total,
+            dragging,
+        );
+        let mut image_heights = self.image_heights(&parsed.images, wrap_total, dragging);
+        let html_image_signature = render_cache::fingerprint(
+            &image_heights
+                .iter()
+                .flatten()
+                .map(|h| h.to_bits())
+                .collect::<Vec<_>>(),
+        );
+        let mut visible_images = parsed.images.clone();
+        for (line, links) in visible_images.iter_mut().enumerate() {
+            let keep: Vec<_> = links
+                .iter()
+                .enumerate()
+                .filter(|(_, link)| {
+                    !html_hidden
+                        .iter()
+                        .any(|range| range.contains(&link.source_offset))
+                })
+                .map(|(index, _)| index)
+                .collect();
+            image_heights[line] = keep
+                .iter()
+                .filter_map(|&index| image_heights[line].get(index).copied())
+                .collect();
+            *links = keep.iter().map(|&index| links[index].clone()).collect();
+        }
+        for (line, heights) in image_heights.iter_mut().enumerate() {
+            if parsed
+                .html
+                .details
+                .iter()
+                .zip(&details_open)
+                .any(|(d, open)| {
+                    !open
+                        && d.body.start <= parsed.html.offsets[line]
+                        && d.body.end >= parsed.html.offsets[line] + parsed.lines[line].len()
+                })
+            {
+                heights.clear();
+            }
+        }
         let table_widths = &self.table_widths;
         let mode = usize::from(self.source_mode);
         let layout_style = LayoutStyle {
@@ -2156,12 +2306,33 @@ impl MarkdownEditor {
             } else {
                 parsed.languages[i].as_deref()
             };
-            let block = if self.source_mode {
+            let html_editing =
+                parsed
+                    .html
+                    .tables
+                    .iter()
+                    .zip(&html_table_expanded)
+                    .any(|(t, expanded)| {
+                        *expanded
+                            && i >= parsed.html.line(t.range.start)
+                            && i <= parsed.html.line(t.range.end.saturating_sub(1))
+                    })
+                    || parsed
+                        .html
+                        .image_groups
+                        .iter()
+                        .zip(&html_images_expanded)
+                        .any(|(group, expanded)| {
+                            *expanded
+                                && i >= parsed.html.line(group.range.start)
+                                && i <= parsed.html.line(group.range.end.saturating_sub(1))
+                        });
+            let block = if self.source_mode || html_editing {
                 Block::CodeLine
             } else {
                 parsed.blocks[i].clone()
             };
-            let reveal = reveal_range.is_some_and(|(s, e)| i >= s && i <= e);
+            let reveal = html_editing || reveal_range.is_some_and(|(s, e)| i >= s && i <= e);
             let code_index = membership[i];
             let code_block = code_index.map(|index| &blocks[index]);
             let table_index = table_membership[i];
@@ -2173,7 +2344,8 @@ impl MarkdownEditor {
                     .position(|range| cursor_byte <= range.end)
                     .unwrap_or(ranges.len().saturating_sub(1))
             });
-            let image_height: f32 = image_heights[i].iter().sum();
+            let image_height: f32 = image_heights[i].iter().sum::<f32>()
+                + image_flows[i].as_ref().map_or(0.0, |flow| flow.height);
             let hidden = (!self.source_mode
                 && !reveal
                 && parsed.images[i].iter().any(|image| image.standalone))
@@ -2191,6 +2363,33 @@ impl MarkdownEditor {
                 && !matches!(parsed.blocks[i - 1], Block::Blank)
                 && !matches!(parsed.blocks[i + 1], Block::Blank);
             let key = RowKey {
+                html: if self.source_mode {
+                    0
+                } else {
+                    render_cache::fingerprint(&(
+                        parsed.html.signatures[i],
+                        html_visibility_signature,
+                        if parsed
+                            .html
+                            .tables
+                            .iter()
+                            .any(|t| parsed.html.line(t.range.start) == i)
+                        {
+                            html_image_signature
+                        } else {
+                            0
+                        },
+                        &details_open,
+                        html_editing,
+                        parsed
+                            .html
+                            .tables
+                            .iter()
+                            .filter(|t| parsed.html.line(t.range.start) == i)
+                            .map(|t| t.signature)
+                            .collect::<Vec<_>>(),
+                    ))
+                },
                 block: block.clone(),
                 compact_blank,
                 code: if self.source_mode {
@@ -2219,11 +2418,13 @@ impl MarkdownEditor {
                 self.work.cached_rows += 1;
                 continue;
             }
-            let plan = plan(
+            let (plan, extras) = parsed.html.plan(
                 line,
+                parsed.html.offsets[i],
                 &block,
                 lang,
                 reveal && !matches!(block, Block::Heading { .. }),
+                &html_hidden,
             );
 
             let m = metrics(&plan.kind);
@@ -2254,29 +2455,38 @@ impl MarkdownEditor {
                 }
             }
 
-            let inset = match &plan.kind {
-                RowKind::Bullet { cols } | RowKind::Task { cols, .. } => {
-                    *cols as f32 * cell_w + (base * 1.6).round()
+            let disclosure = !self.source_mode
+                && parsed.html.details.iter().any(|d| {
+                    parsed.html.line(d.label) == i
+                        && !html_hidden.iter().any(|r| r.contains(&d.range.start))
+                });
+            let inset = if disclosure && !reveal {
+                22.0
+            } else {
+                match &plan.kind {
+                    RowKind::Bullet { cols } | RowKind::Task { cols, .. } => {
+                        *cols as f32 * cell_w + (base * 1.6).round()
+                    }
+                    RowKind::Ordered { cols, number } => {
+                        let shaped = window.text_system().shape_line(
+                            SharedString::from(format!("{number}.")),
+                            px(size),
+                            &[TextRun {
+                                len: format!("{number}.").len(),
+                                font: prose.clone(),
+                                color: Hsla::default(),
+                                background_color: None,
+                                underline: None,
+                                strikethrough: None,
+                            }],
+                            None,
+                        );
+                        *cols as f32 * cell_w + f32::from(shaped.width) + (base * 0.55).round()
+                    }
+                    RowKind::Quote { depth } => *depth as f32 * (base * 1.1).round(),
+                    RowKind::Code { .. } | RowKind::Fence { .. } => (base * 0.75).round(),
+                    _ => 0.0,
                 }
-                RowKind::Ordered { cols, number } => {
-                    let shaped = window.text_system().shape_line(
-                        SharedString::from(format!("{number}.")),
-                        px(size),
-                        &[TextRun {
-                            len: format!("{number}.").len(),
-                            font: prose.clone(),
-                            color: Hsla::default(),
-                            background_color: None,
-                            underline: None,
-                            strikethrough: None,
-                        }],
-                        None,
-                    );
-                    *cols as f32 * cell_w + f32::from(shaped.width) + (base * 0.55).round()
-                }
-                RowKind::Quote { depth } => *depth as f32 * (base * 1.1).round(),
-                RowKind::Code { .. } | RowKind::Fence { .. } => (base * 0.75).round(),
-                _ => 0.0,
             };
             let right_pad = match &plan.kind {
                 RowKind::Code { .. } | RowKind::Fence { .. } => inset,
@@ -2307,7 +2517,8 @@ impl MarkdownEditor {
                 let heading = matches!(plan.kind, RowKind::Heading(_));
                 plan.runs
                     .iter()
-                    .map(|run| {
+                    .zip(&extras)
+                    .map(|(run, extra)| {
                         let s = run.style;
                         let font = Font {
                             family: if s.code {
@@ -2336,7 +2547,10 @@ impl MarkdownEditor {
                         } else if matches!(plan.kind, RowKind::Quote { .. }) {
                             quote_text
                         } else {
-                            text_color
+                            extra
+                                .color
+                                .map(|c| gpui::rgb(c).into())
+                                .unwrap_or(text_color)
                         };
                         TextRun {
                             len: run.len,
@@ -2347,12 +2561,14 @@ impl MarkdownEditor {
                             } else if s.code {
                                 Some(code_bg)
                             } else {
-                                None
+                                extra.background.map(|c| gpui::rgb(c).into())
                             },
-                            underline: (s.link && !run.marker).then(|| UnderlineStyle {
-                                thickness: px(1.0),
-                                color: Some(accent),
-                                wavy: false,
+                            underline: ((s.link || extra.underline) && !run.marker).then(|| {
+                                UnderlineStyle {
+                                    thickness: px(1.0),
+                                    color: Some(accent),
+                                    wavy: false,
+                                }
                             }),
                             strikethrough: s.strike.then(|| StrikethroughStyle {
                                 thickness: px(1.0),
@@ -2371,28 +2587,9 @@ impl MarkdownEditor {
                 None
             } else {
                 self.work.shaped_rows += 1;
-                window
-                    .text_system()
-                    .shape_text(
-                        SharedString::from(plan.visible.clone()),
-                        px(size),
-                        &runs,
-                        Some(px(wrap)),
-                        None,
-                    )
-                    .ok()
-                    .and_then(|mut lines| {
-                        if lines.is_empty() {
-                            None
-                        } else {
-                            Some(std::rc::Rc::new(lines.swap_remove(0)))
-                        }
-                    })
+                ShapedText::new(&plan.visible, size, &runs, &extras, wrap, window).map(Rc::new)
             };
-            let visual_rows = shaped
-                .as_ref()
-                .map_or(1, |s| s.wrap_boundaries().len() + 1)
-                .max(1);
+            let visual_rows = shaped.as_ref().map_or(1, |s| s.visual_rows()).max(1);
             let mut height = pad_top
                 + if hidden {
                     0.0
@@ -2417,6 +2614,7 @@ impl MarkdownEditor {
                 }
             }
             let mut row = Row {
+                html_table: None,
                 plan,
                 text: shaped,
                 line_h,
@@ -2425,9 +2623,49 @@ impl MarkdownEditor {
                 height,
                 y: Cell::new(y),
                 cells: Vec::new(),
-                align: TextAlign::Left,
+                align: match extras.iter().find_map(|s| s.align) {
+                    Some(1) => TextAlign::Center,
+                    Some(2) => TextAlign::Right,
+                    _ => TextAlign::Left,
+                },
                 wrap,
             };
+            let affected = parsed.html.tags.iter().any(|t| {
+                t.range.start <= parsed.html.offsets[i] + line.len()
+                    && t.range.end > parsed.html.offsets[i]
+            }) || parsed.html.comments.iter().any(|r| {
+                r.start <= parsed.html.offsets[i] + line.len() && r.end > parsed.html.offsets[i]
+            }) || html_hidden.iter().any(|r| {
+                r.start <= parsed.html.offsets[i] && r.end >= parsed.html.offsets[i] + line.len()
+            });
+            if !self.source_mode && !reveal && affected && row.plan.visible.trim().is_empty() {
+                row.height = 0.0;
+                row.text = None;
+            }
+            if let Some(table) =
+                parsed
+                    .html
+                    .tables
+                    .iter()
+                    .zip(&html_table_visible)
+                    .find_map(|(table, visible)| {
+                        (*visible && parsed.html.line(table.range.start) == i).then_some(table)
+                    })
+            {
+                let layout = editor_html::shape_table(
+                    table,
+                    &parsed.html,
+                    &parsed.lines,
+                    wrap_total,
+                    &cell_style,
+                    &parsed.images,
+                    &self.images.entries,
+                    window,
+                );
+                self.work.shaped_cells += layout.cells.len() as u64;
+                row.height += layout.height;
+                row.html_table = Some(layout);
+            }
             if let Some(index) = table_membership[i] {
                 let table = &tables[index];
                 // Keep the delimiter available when navigating its source line.
@@ -2493,6 +2731,21 @@ impl MarkdownEditor {
                 }
             }
             row.height += image_height;
+            if !self.source_mode
+                && parsed
+                    .html
+                    .details
+                    .iter()
+                    .zip(&details_open)
+                    .any(|(d, open)| {
+                        !open
+                            && d.body.start <= parsed.html.offsets[i]
+                            && d.body.end >= parsed.html.offsets[i] + line.len()
+                    })
+            {
+                row.height = 0.0;
+                row.text = None;
+            }
             y += row.height;
             rows.push(self.mode_layouts[mode].rows.insert(i, key, row));
         }
@@ -2544,10 +2797,49 @@ impl MarkdownEditor {
                 .map(|t| f32::from(t.font_size()))
                 .unwrap_or(base);
             let mut el = div().relative().w_full().h(px(row.height));
+            if let Some(flow) = &image_flows[i] {
+                el = el.child(self.image_flow_element(flow, row.height, rule_color, dimmed, cx));
+            }
+            if let Some(table) = &row.html_table {
+                el = el.child(
+                    div()
+                        .absolute()
+                        .left_0()
+                        .top(px(row.height
+                            - table.height
+                            - image_heights[i].iter().sum::<f32>()))
+                        .w_full()
+                        .child(self.html_table_element(table, i, rule_color, code_bg, cx)),
+                );
+            }
+            if !self.source_mode {
+                for (index, detail) in parsed.html.details.iter().enumerate() {
+                    if parsed.html.line(detail.label) == i
+                        && !html_hidden.iter().any(|r| r.contains(&detail.range.start))
+                        && !row.plan.revealed
+                    {
+                        el = el.child(self.details_toggle(
+                            index,
+                            detail.key,
+                            Pos::new(
+                                i,
+                                col_for_byte(
+                                    &parsed.lines[i],
+                                    detail.label - parsed.html.offsets[i],
+                                ),
+                            ),
+                            details_open[index],
+                            base,
+                            dimmed,
+                            cx,
+                        ));
+                    }
+                }
+            }
             if !image_heights[i].is_empty() {
                 el = el.child(self.image_elements(
                     i,
-                    &parsed.images[i],
+                    &visible_images[i],
                     &image_heights[i],
                     wrap_total,
                     row.height,
@@ -3017,6 +3309,7 @@ impl MarkdownEditor {
                 && !row.plan.visible.is_empty()
             {
                 let line_h = px(row.line_h);
+                let align = row.align;
                 let text_h = row.visual_rows() as f32 * row.line_h;
                 el = el.child(
                     div()
@@ -3030,18 +3323,9 @@ impl MarkdownEditor {
                             move |bounds, _, window, cx| {
                                 let origin = bounds.origin;
                                 shaped
-                                    .paint_background(
-                                        origin,
-                                        line_h,
-                                        TextAlign::Left,
-                                        None,
-                                        window,
-                                        cx,
-                                    )
+                                    .paint_background(origin, line_h, align, None, window, cx)
                                     .ok();
-                                shaped
-                                    .paint(origin, line_h, TextAlign::Left, None, window, cx)
-                                    .ok();
+                                shaped.paint(origin, line_h, align, None, window, cx).ok();
                             },
                         )),
                 );

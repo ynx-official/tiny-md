@@ -19,18 +19,30 @@ pub(crate) struct ImageLink {
     pub target: String,
     pub alt: String,
     pub standalone: bool,
+    pub width: Option<f32>,
+    pub height: Option<f32>,
+    pub align: u8,
+    pub source_offset: usize,
+    pub href: Option<String>,
 }
 
+#[cfg(test)]
 pub(crate) fn collect(lines: &[String]) -> Vec<Vec<ImageLink>> {
+    let source = lines.join("\n");
+    let root = crate::html::parse_root(&source);
+    let html = crate::html::Document::parse(&source, root.as_ref());
+    collect_from_root(lines, &source, root.as_ref(), &html)
+}
+
+pub(crate) fn collect_from_root(
+    lines: &[String],
+    source: &str,
+    root: Option<&Node>,
+    html: &crate::html::Document,
+) -> Vec<Vec<ImageLink>> {
     let mut rows = vec![Vec::new(); lines.len()];
     // Most edits contain no images. Avoid a second Markdown parse in that case.
-    if !lines.iter().any(|line| line.contains("![")) {
-        return rows;
-    }
-    let source = lines.join("\n");
-    let mut options = markdown::ParseOptions::gfm();
-    options.constructs.frontmatter = true;
-    let Ok(root) = markdown::to_mdast(&source, &options) else {
+    let Some(root) = root else {
         return rows;
     };
     fn visit<'a>(node: &'a Node, nodes: &mut Vec<&'a Node>) {
@@ -42,7 +54,7 @@ pub(crate) fn collect(lines: &[String]) -> Vec<Vec<ImageLink>> {
         }
     }
     let mut nodes = Vec::new();
-    visit(&root, &mut nodes);
+    visit(root, &mut nodes);
     let mut definitions = HashMap::new();
     for node in &nodes {
         if let Node::Definition(def) = node {
@@ -74,8 +86,50 @@ pub(crate) fn collect(lines: &[String]) -> Vec<Vec<ImageLink>> {
                     && source
                         .get(position.start.offset..position.end.offset)
                         .is_some_and(|image| image == lines[line].trim()),
+                width: None,
+                height: None,
+                align: 0,
+                source_offset: position.start.offset,
+                href: None,
             });
         }
+    }
+    for tag in html.image_tags() {
+        let line = html.line(tag.range.start);
+        let dimension = |name: &str| {
+            let css = tag.attrs.get("style").and_then(|s| {
+                s.split(';')
+                    .filter_map(|d| d.split_once(':'))
+                    .filter(|(key, _)| key.trim().eq_ignore_ascii_case(name))
+                    .map(|(_, value)| value.trim())
+                    .next_back()
+            });
+            css.or_else(|| tag.attrs.get(name).map(String::as_str))
+                .and_then(|v| v.trim().trim_end_matches("px").parse::<f32>().ok())
+                .filter(|v| v.is_finite() && *v > 0.0)
+                .map(|v| v.min(16384.0))
+        };
+        if let Some(target) = tag.attrs.get("src") {
+            rows[line].push(ImageLink {
+                target: target.clone(),
+                alt: tag.attrs.get("alt").cloned().unwrap_or_default(),
+                standalone: source
+                    .get(tag.range.clone())
+                    .is_some_and(|s| s == lines[line].trim()),
+                width: dimension("width"),
+                height: dimension("height"),
+                align: match tag.attrs.get("align").map(String::as_str) {
+                    Some("center") => 1,
+                    Some("right") => 2,
+                    _ => html.alignment_at(tag.range.start),
+                },
+                source_offset: tag.range.start,
+                href: html.link_at(tag.range.start),
+            });
+        }
+    }
+    for row in &mut rows {
+        row.sort_by_key(|image| image.source_offset);
     }
     rows
 }
@@ -254,6 +308,22 @@ pub(crate) fn display_size(image: &RenderImage, available: f32) -> (f32, f32) {
     let height = size.height.0 as f32;
     let scale = (available.max(1.0) / width).min(1.0);
     (width * scale, height * scale)
+}
+
+pub(crate) fn display_size_for(
+    image: &RenderImage,
+    available: f32,
+    link: &ImageLink,
+) -> (f32, f32) {
+    let (natural_w, natural_h) = display_size(image, f32::MAX);
+    let (w, h) = match (link.width, link.height) {
+        (Some(w), Some(h)) => (w, h),
+        (Some(w), None) => (w, natural_h * w / natural_w),
+        (None, Some(h)) => (natural_w * h / natural_h, h),
+        _ => (natural_w, natural_h),
+    };
+    let scale = (available.max(1.0) / w).min(1.0);
+    (w * scale, h * scale)
 }
 
 #[cfg(test)]

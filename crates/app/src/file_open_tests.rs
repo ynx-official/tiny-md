@@ -31,6 +31,35 @@ pub(super) fn assert_opened(cx: &App, path: &Path, text: &str) {
 }
 
 #[gpui::test]
+fn html_preview_and_save_preserve_original_html_bytes(cx: &mut TestAppContext) {
+    init(cx);
+    let directory = tempfile::tempdir().unwrap();
+    let text = "<p align='center'>中文 &amp; 🌱</p>\r\n<details open><summary>说明</summary><table><tr><td colspan='2'>原文</td></tr></table></details>\r\n";
+    let mut bytes = vec![0xef, 0xbb, 0xbf];
+    bytes.extend_from_slice(text.as_bytes());
+    let path = directory.path().join("html.md");
+    std::fs::write(&path, &bytes).unwrap();
+    let saved = directory.path().join("copy.md");
+    let (view, cx) = cx.add_window_view(|window, cx| TinyMd::new(Some(path.clone()), window, cx));
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    cx.update(|window, cx| {
+        view.update(cx, |this, cx| {
+            this.editor
+                .update(cx, |editor, cx| editor.set_source_mode(true, cx));
+            this.editor
+                .update(cx, |editor, cx| editor.set_source_mode(false, cx));
+            this.write(Some(saved.clone()), None, window, cx);
+        })
+    });
+    cx.run_until_parked();
+    assert_eq!(std::fs::read(path).unwrap(), bytes);
+    assert_eq!(std::fs::read(saved).unwrap(), bytes);
+}
+
+#[gpui::test]
 fn markdown_image_base_tracks_open_switch_save_as_and_new_document(cx: &mut TestAppContext) {
     init(cx);
     let directory = tempfile::tempdir().unwrap();

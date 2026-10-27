@@ -1,6 +1,42 @@
 use super::*;
 use std::io::Write;
 
+#[test]
+fn html_image_is_discovered_without_rewriting_attributes() {
+    let rows = images("<img src='图 片.png?a=1&amp;b=2' alt='中文' width='320'>");
+    assert_eq!(rows[0].len(), 1);
+    assert_eq!(rows[0][0].target, "图 片.png?a=1&b=2");
+    assert_eq!(rows[0][0].alt, "中文");
+    assert!(rows[0][0].standalone);
+}
+
+#[test]
+fn html_images_share_limits_alignment_order_and_code_exclusions() {
+    let rows = images(
+        "文字 <img src='first.png' width='80' height='40'> ![第二](second.png)\n\n<p align='center'><img src='third.png' style='width:60px'></p>",
+    );
+    assert_eq!(
+        rows[0]
+            .iter()
+            .map(|i| i.target.as_str())
+            .collect::<Vec<_>>(),
+        ["first.png", "second.png"]
+    );
+    assert_eq!(rows[2][0].align, 1);
+    let image = decode(&png(200, 100)).unwrap();
+    assert_eq!(display_size_for(&image, 100.0, &rows[0][0]), (80.0, 40.0));
+    assert_eq!(display_size_for(&image, 30.0, &rows[2][0]), (30.0, 15.0));
+    for source in [
+        "`<img src='no.png'>`",
+        "```html\n<img src='no.png'>\n```",
+        "<!-- <img src='no.png'> -->",
+        "<script><img src='no.png'></script>",
+        "\\<img src='no.png'>",
+    ] {
+        assert!(images(source).iter().all(Vec::is_empty), "{source}");
+    }
+}
+
 fn images(source: &str) -> Vec<Vec<ImageLink>> {
     collect(&source.split('\n').map(str::to_owned).collect::<Vec<_>>())
 }

@@ -3,6 +3,175 @@ use gpui::TestAppContext;
 use gpui::{EntityInputHandler, ScrollDelta, ScrollWheelEvent, size};
 
 #[gpui::test]
+fn html_inline_preview_preserves_source_and_renders_text(cx: &mut TestAppContext) {
+    cx.update(|cx| guise::Theme::light().init(cx));
+    let source = "中文 <strong>加粗</strong> &amp; <u>下划线</u><br>下一行";
+    let (editor, cx) =
+        cx.add_window_view(|_, cx| MarkdownEditor::new(cx).value(source).read_only(true));
+    draw(cx);
+    cx.read(|cx| {
+        let editor = editor.read(cx);
+        assert_eq!(editor.layout[0].plan.visible, "中文 加粗 & 下划线\n下一行");
+        assert_eq!(editor.layout[0].visual_rows(), 2);
+        assert_eq!(editor.text(), source);
+    });
+}
+
+#[gpui::test]
+fn html_details_toggle_only_changes_view(cx: &mut TestAppContext) {
+    cx.update(|cx| guise::Theme::light().init(cx));
+    let source = "<details>\n<summary>中文标题</summary>\n正文 <b>加粗</b>\n</details>\n后文";
+    let (editor, cx) =
+        cx.add_window_view(|_, cx| MarkdownEditor::new(cx).value(source).read_only(true));
+    draw(cx);
+    cx.read(|cx| assert_eq!(editor.read(cx).layout[2].height, 0.0));
+    let toggle = cx
+        .debug_bounds("html-details-toggle-0")
+        .expect("details toggle");
+    cx.simulate_click(toggle.center(), gpui::Modifiers::none());
+    draw(cx);
+    cx.read(|cx| {
+        assert!(editor.read(cx).layout[2].height > 0.0);
+        assert_eq!(editor.read(cx).text(), source);
+    });
+}
+
+#[gpui::test]
+fn html_table_preview_reveals_original_source_for_editing(cx: &mut TestAppContext) {
+    cx.update(|cx| guise::Theme::light().init(cx));
+    let source = "Intro\n<table>\n<tr><th colspan='2'>标题</th></tr>\n<tr><td>中文<br>换行</td><td>B</td></tr>\n</table>\nAfter";
+    let (editor, cx) = cx.add_window_view(|_, cx| MarkdownEditor::new(cx).value(source));
+    draw(cx);
+    let table = cx
+        .debug_bounds("html-table-cell-0")
+        .expect("HTML cell preview");
+    cx.read(|cx| {
+        let editor = editor.read(cx);
+        assert_eq!(editor.layout[2].height, 0.0);
+        assert!(editor.layout[1].height > editor.layout[0].height * 2.0);
+        assert_eq!(editor.text(), source);
+    });
+    cx.simulate_click(table.center(), gpui::Modifiers::none());
+    draw(cx);
+    cx.read(|cx| {
+        assert!(editor.read(cx).layout[2].height > 0.0);
+        assert_eq!(editor.read(cx).text(), source);
+    });
+}
+
+#[gpui::test]
+fn html_table_preserves_literal_text_and_inherits_container_style(cx: &mut TestAppContext) {
+    cx.update(|cx| guise::Theme::light().init(cx));
+    let source =
+        "<table style='font-style:italic'><tr><td>**原文** &amp;</td><td>普通字</td></tr></table>";
+    let (editor, cx) =
+        cx.add_window_view(|_, cx| MarkdownEditor::new(cx).value(source).read_only(true));
+    draw(cx);
+    cx.read(|cx| {
+        let editor = editor.read(cx);
+        let table = editor.layout[0].html_table.as_ref().unwrap();
+        assert_eq!(table.cells[0].row.plan.visible, "**原文** &");
+        assert!(
+            table
+                .cells
+                .iter()
+                .all(|cell| cell.row.plan.runs.iter().all(|run| run.style.italic))
+        );
+        assert_eq!(editor.text(), source);
+    });
+}
+
+#[gpui::test]
+fn html_chinese_composition_source_switch_and_undo_preserve_tags(cx: &mut TestAppContext) {
+    cx.update(|cx| guise::Theme::light().init(cx));
+    let source =
+        "中文 <span style='color:#c00'>原文🌱</span> &amp;\n<table><tr><td>内容</td></tr></table>";
+    let (editor, cx) = cx.add_window_view(|window, cx| {
+        let mut editor = MarkdownEditor::new(cx).value(source);
+        editor
+            .model
+            .move_to(0, "中文 <span style='color:#c00'>".chars().count(), false);
+        window.focus(&editor.focus);
+        editor
+    });
+    draw(cx);
+    cx.update(|window, app| {
+        editor.update(app, |editor, cx| {
+            editor.replace_and_mark_text_in_range(None, "pinyin", Some(6..6), window, cx);
+        })
+    });
+    draw(cx);
+    cx.update(|window, app| {
+        editor.update(app, |editor, cx| {
+            let range = editor.ime.marked().unwrap();
+            assert!(
+                editor
+                    .bounds_for_range(range, Bounds::default(), window, cx)
+                    .is_some()
+            );
+            editor.replace_text_in_range(None, "输入法", window, cx);
+        })
+    });
+    draw(cx);
+    cx.read(|cx| {
+        assert_eq!(
+            editor.read(cx).text(),
+            source.replacen("原文", "输入法原文", 1)
+        )
+    });
+    editor.update(cx, |editor, cx| editor.set_source_mode(true, cx));
+    draw(cx);
+    editor.update(cx, |editor, cx| editor.set_source_mode(false, cx));
+    draw(cx);
+    cx.dispatch_action(actions::Undo);
+    draw(cx);
+    cx.read(|cx| assert_eq!(editor.read(cx).text(), source));
+}
+
+#[gpui::test]
+fn html_details_hides_markdown_fences_and_single_line_body(cx: &mut TestAppContext) {
+    cx.update(|cx| guise::Theme::light().init(cx));
+    let source = "<details>\n<summary>代码</summary>\n\n```rust\nlet x = 1;\n```\n\n</details>\n<details><summary>摘要</summary>隐藏内容</details>";
+    let (editor, cx) =
+        cx.add_window_view(|_, cx| MarkdownEditor::new(cx).value(source).read_only(true));
+    draw(cx);
+    cx.read(|cx| {
+        let editor = editor.read(cx);
+        for line in 2..7 {
+            assert_eq!(editor.layout[line].height, 0.0, "line {line}");
+        }
+        assert_eq!(editor.layout[8].plan.visible, "摘要");
+    });
+}
+
+#[gpui::test]
+fn html_table_content_edit_invalidates_preview_and_multiline_summary_is_toggleable(
+    cx: &mut TestAppContext,
+) {
+    cx.update(|cx| guise::Theme::light().init(cx));
+    let source = "<table>\n<tr><td>AAA</td></tr>\n</table>\n<details>\n<summary>\n标题\n</summary>\n内容\n</details>";
+    let (editor, cx) =
+        cx.add_window_view(|_, cx| MarkdownEditor::new(cx).value(source).read_only(true));
+    draw(cx);
+    assert!(cx.debug_bounds("html-details-toggle-0").is_some());
+    editor.update(cx, |editor, cx| {
+        editor.apply_external_text(&source.replace("AAA", "BBB"), cx);
+    });
+    draw(cx);
+    cx.read(|cx| {
+        let editor = editor.read(cx);
+        assert_eq!(
+            editor.layout[0].html_table.as_ref().unwrap().cells[0]
+                .row
+                .plan
+                .visible,
+            "BBB"
+        );
+        assert_eq!(editor.layout[7].height, 0.0);
+    });
+}
+
+#[gpui::test]
 fn markdown_image_preview_is_present_in_formatted_mode(cx: &mut TestAppContext) {
     cx.update(|cx| guise::Theme::light().init(cx));
     let source = "![方案阅读方式对比](../02-design/assets/comparison.png)";

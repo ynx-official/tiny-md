@@ -12,6 +12,7 @@ use std::{
 };
 
 pub(crate) struct ParsedDocument {
+    pub html: crate::html::Document,
     pub lines: Vec<String>,
     pub images: Vec<Vec<crate::markdown_images::ImageLink>>,
     pub blocks: Vec<Block>,
@@ -27,6 +28,13 @@ pub(crate) struct ParsedDocument {
 
 impl ParsedDocument {
     fn parse(lines: &[String]) -> Self {
+        let source = lines.join("\n");
+        let root = (source.contains("![") || source.contains('<') || source.contains('&'))
+            .then(|| crate::html::parse_root(&source))
+            .flatten();
+        let html = crate::html::Document::parse(&source, root.as_ref());
+        let images =
+            crate::markdown_images::collect_from_root(lines, &source, root.as_ref(), &html);
         let mut state = DocState::default();
         let mut languages = Vec::with_capacity(lines.len());
         let blocks = lines
@@ -50,7 +58,8 @@ impl ParsedDocument {
         let source_signatures = source_tokens.iter().map(fingerprint).collect();
         Self {
             lines: lines.to_vec(),
-            images: crate::markdown_images::collect(lines),
+            images,
+            html,
             blocks,
             languages,
             tables,

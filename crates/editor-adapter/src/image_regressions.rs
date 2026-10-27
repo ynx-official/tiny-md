@@ -26,6 +26,148 @@ fn ready(editor: &MarkdownEditor, target: &str) -> Arc<gpui::RenderImage> {
 }
 
 #[gpui::test]
+fn html_badges_share_one_centered_row_and_wrap_at_viewport_width(cx: &mut TestAppContext) {
+    cx.update(|cx| guise::Theme::light().init(cx));
+    let dir = tempfile::tempdir().unwrap();
+    png(&dir.path().join("badge.png"), 100, 20);
+    let source = "<!-- Badges -->\n<p align=\"center\">\n  <a href=\"https://example.com/release\">\n    <img src=\"badge.png\" alt=\"Version\">\n  </a>\n  <a href=\"LICENSE\">\n    <img src=\"badge.png\" alt=\"License\">\n  </a>\n  <a href=\"https://example.com/stars\"><img src=\"badge.png\" alt=\"Stars\"></a>\n</p>\n\n后文";
+    let (editor, cx) = cx.add_window_view(|_, cx| {
+        let mut editor = MarkdownEditor::new(cx).value(source).read_only(true);
+        editor.set_document_path(Some(&dir.path().join("note.md")), cx);
+        editor
+    });
+    let links = Rc::new(std::cell::RefCell::new(Vec::new()));
+    let observed = links.clone();
+    cx.update(|_, cx| {
+        cx.subscribe(&editor, move |_, event, _| {
+            if let MarkdownEditorEvent::LinkClick(target) = event {
+                observed.borrow_mut().push(target.clone());
+            }
+        })
+        .detach();
+    });
+    cx.simulate_resize(size(px(640.0), px(600.0)));
+    draw(cx);
+    draw(cx);
+    let group = cx.debug_bounds("html-image-flow").expect("badge group");
+    let first = cx.debug_bounds("html-inline-image-0").unwrap();
+    let second = cx.debug_bounds("html-inline-image-1").unwrap();
+    let third = cx.debug_bounds("html-inline-image-2").unwrap();
+    assert_eq!(first.origin.y, second.origin.y);
+    assert_eq!(second.origin.y, third.origin.y);
+    assert!(second.origin.x >= first.right());
+    cx.simulate_click(first.center(), gpui::Modifiers::none());
+    cx.simulate_click(second.center(), gpui::Modifiers::none());
+    assert_eq!(*links.borrow(), ["https://example.com/release", "LICENSE"]);
+    assert!((f32::from((first.origin.x + third.right()) / 2.0 - group.center().x)).abs() < 1.0);
+    cx.read(|cx| {
+        let editor = editor.read(cx);
+        assert_eq!(editor.layout[0].height, 0.0, "HTML comments are invisible");
+        assert!(editor.layout[2..10].iter().all(|row| row.height == 0.0));
+        assert_eq!(editor.text(), source);
+    });
+    cx.simulate_resize(size(px(250.0), px(600.0)));
+    draw(cx);
+    draw(cx);
+    let first = cx.debug_bounds("html-inline-image-0").unwrap();
+    let third = cx.debug_bounds("html-inline-image-2").unwrap();
+    assert!(third.origin.y > first.origin.y, "narrow view wraps badges");
+}
+
+#[gpui::test]
+fn html_badges_keep_explicit_breaks_link_actions_and_source_undo(cx: &mut TestAppContext) {
+    use gpui::EntityInputHandler;
+    cx.update(|cx| guise::Theme::light().init(cx));
+    let dir = tempfile::tempdir().unwrap();
+    png(&dir.path().join("badge.png"), 100, 20);
+    let source = "Intro\n\n<p align='center'>\n<a href='https://example.com'><img src='badge.png'></a><br><img src='badge.png'>\n</p>\n\nAfter";
+    let (editor, cx) = cx.add_window_view(|window, cx| {
+        let mut editor = MarkdownEditor::new(cx).value(source);
+        editor.set_document_path(Some(&dir.path().join("note.md")), cx);
+        window.focus(&editor.focus);
+        editor
+    });
+    let links = Rc::new(std::cell::RefCell::new(Vec::new()));
+    let observed = links.clone();
+    cx.update(|_, cx| {
+        cx.subscribe(&editor, move |_, event, _| {
+            if let MarkdownEditorEvent::LinkClick(target) = event {
+                observed.borrow_mut().push(target.clone());
+            }
+        })
+        .detach();
+    });
+    cx.simulate_resize(size(px(640.0), px(600.0)));
+    draw(cx);
+    draw(cx);
+    let first = cx.debug_bounds("html-inline-image-0").unwrap();
+    let second = cx.debug_bounds("html-inline-image-1").unwrap();
+    assert!(second.origin.y > first.origin.y, "br forces a line break");
+    cx.simulate_click(
+        first.center(),
+        gpui::Modifiers {
+            platform: cfg!(target_os = "macos"),
+            control: !cfg!(target_os = "macos"),
+            ..Default::default()
+        },
+    );
+    assert_eq!(*links.borrow(), ["https://example.com"]);
+    cx.simulate_click(first.center(), gpui::Modifiers::none());
+    draw(cx);
+    cx.read(|cx| {
+        let editor = editor.read(cx);
+        assert_eq!(editor.model.cursor().line, 3);
+        assert_eq!(editor.layout[2].plan.visible, "<p align='center'>");
+        assert_eq!(editor.text(), source);
+    });
+    cx.update(|window, app| {
+        editor.update(app, |editor, cx| {
+            editor.replace_and_mark_text_in_range(None, "zhongwen", Some(8..8), window, cx);
+            editor.replace_text_in_range(None, "中文", window, cx);
+        })
+    });
+    draw(cx);
+    assert!(cx.read(|cx| editor.read(cx).text()).contains("中文<a"));
+    cx.dispatch_action(actions::Undo);
+    draw(cx);
+    assert_eq!(cx.read(|cx| editor.read(cx).text()), source);
+    editor.update(cx, |editor, cx| {
+        editor.set_source_mode(true, cx);
+    });
+    draw(cx);
+    cx.read(|cx| {
+        assert_eq!(
+            editor.read(cx).layout[3].plan.visible,
+            source.lines().nth(3).unwrap()
+        )
+    });
+    editor.update(cx, |editor, cx| {
+        editor.model.move_to(0, 0, false);
+        editor.set_source_mode(false, cx);
+    });
+    draw(cx);
+    cx.read(|cx| {
+        assert_eq!(editor.read(cx).layout[3].height, 0.0);
+        assert_eq!(editor.read(cx).text(), source);
+    });
+}
+
+#[gpui::test]
+fn html_single_line_details_hides_its_image_until_opened(cx: &mut TestAppContext) {
+    cx.update(|cx| guise::Theme::light().init(cx));
+    let source = "<details><summary>图片</summary><img src='missing.png'></details>";
+    let (editor, cx) =
+        cx.add_window_view(|_, cx| MarkdownEditor::new(cx).value(source).read_only(true));
+    draw(cx);
+    assert!(cx.debug_bounds("markdown-image").is_none());
+    let toggle = cx.debug_bounds("html-details-toggle-0").unwrap();
+    cx.simulate_click(toggle.center(), gpui::Modifiers::none());
+    draw(cx);
+    assert!(cx.debug_bounds("markdown-image").is_some());
+    assert_eq!(cx.read(|cx| editor.read(cx).text()), source);
+}
+
+#[gpui::test]
 fn markdown_image_local_render_edit_source_resize_and_reuse(cx: &mut TestAppContext) {
     cx.update(|cx| guise::Theme::light().init(cx));
     let dir = tempfile::tempdir().unwrap();
@@ -163,4 +305,31 @@ fn markdown_image_source_only_does_not_start_downloads(cx: &mut TestAppContext) 
     draw(cx);
     cx.read(|cx| assert!(editor.read(cx).images.entries.is_empty()));
     assert!(cx.debug_bounds("markdown-image").is_none());
+}
+
+#[gpui::test]
+fn html_image_in_table_stays_inside_its_cell_after_loading(cx: &mut TestAppContext) {
+    cx.update(|cx| guise::Theme::light().init(cx));
+    let dir = tempfile::tempdir().unwrap();
+    png(&dir.path().join("cell.png"), 200, 100);
+    let source =
+        "<table>\n<tr><td><img src='cell.png' width='80'></td><td>中文</td></tr>\n</table>";
+    let path = dir.path().join("note.md");
+    let (editor, cx) = cx.add_window_view(|_, cx| {
+        let mut editor = MarkdownEditor::new(cx).value(source).read_only(true);
+        editor.set_document_path(Some(&path), cx);
+        editor
+    });
+    draw(cx);
+    draw(cx);
+    let cell = cx.debug_bounds("html-table-cell-0").unwrap();
+    let image = cx.debug_bounds("markdown-image-pixels").unwrap();
+    assert!(cell.contains(&image.origin));
+    assert!(cell.contains(&(image.origin + point(image.size.width, image.size.height))));
+    assert_eq!(image.size.width, px(80.0));
+    assert_eq!(image.size.height, px(40.0));
+    cx.read(|cx| {
+        assert_eq!(editor.read(cx).text(), source);
+        assert_eq!(editor.read(cx).layout[1].height, 0.0);
+    });
 }
