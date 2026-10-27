@@ -10,6 +10,8 @@
 
 同日用户提供 `<p align="center"><a><img></a>…</p>` 徽章示例，指出源码分行导致徽章逐张竖排。此兼容性修复增加图片组的行内排版；保留原有编辑与保存边界。
 
+同日用户要求补齐 `<h3>` 等 HTML 标题；`h1`–`h6` 映射至对应 Markdown 标题的排版规则。
+
 沿用 Rust、GPUI 与 Guise。HTML 是编辑器的展示层：先由现有 Markdown AST 识别文本、HTML 与代码边界，再用 `html5gum 0.8.4` 读取标签、已解码属性及源码字节范围。完整实体使用现有 `markdown` 库解码，并单独记录范围。排版结果保留源码到可见文本的映射，不建立可写 DOM，也不把排版结果序列化回文档。
 
 `html.rs` 负责解析与源文映射，`editor_html.rs` 负责原生表格与折叠控件，`shaped_text.rs` 统一硬换行的绘制、点击与光标坐标。它们由 Windows / macOS 共用。图片复用现有加载器及资源限制；平台输入接口、编辑模型、撤销历史和磁盘保存继续使用原有实现。
@@ -18,6 +20,7 @@
 
 | 类别 | 支持内容 | 展示规则 |
 |---|---|---|
+| 标题 | `h1`–`h6` | 独占源码行的标题使用对应 Markdown 标题字号、字重和留白；支持大小写标签、多行内容、对齐及嵌套文字样式 |
 | 换行 | `br`、`br /` | 正文及 Markdown / HTML 表格内换行 |
 | 图片 | `img` 的 `src`、`alt`、`width`、`height` | 本地相对路径、原生绝对路径、`file:`、HTTP/HTTPS；尺寸按可用宽度约束 |
 | 基础文字 | `b` / `strong`、`i` / `em`、`s` / `del`、`u`、`mark`、`code`、`kbd`、`sub`、`sup` | 字重、斜体、删除线、下划线、标记、等宽与上下标 |
@@ -50,6 +53,8 @@ HTML 表格图片显示在对应单元格内。只包含图片、图片链接、
 
 这是一组常见 HTML 的原生映射，不提供浏览器 CSS 布局。未支持标签、未闭合标签及编辑中的不完整语法保留为可编辑源码；不自动补齐或格式化。标签配对深度上限为 128。
 
+标题沿用编辑器逐源码行布局。建议各标题与正文分别换行书写；同一行的连续标题会分行显示，但混合不同级别标题或正文时保留文字样式，使用正文行尺寸，避免把整行正文放大。表格单元格仍使用表格字号。此项只扩展 HTML 标题展示，大纲继续识别 Markdown 标题。
+
 表格要求显式、正确配对的行与单元格，不自动补齐浏览器允许省略的结束标签。嵌套、无效或在同一源码行开始的多个表格完整回退到源码；多个表格可分别换行书写。单个表格最多 128 列、2048 个输入行，跨行 / 跨列值约束在 1–128；超出列数 / 行数的表格整体回退。各列等宽，保留源码中的单元格空白，不实现完整 CSS 表格算法。
 
 不执行脚本、事件属性、iframe、object、外部样式表、任意 CSS 或 `javascript:` 链接。代码块、行内代码和 Front Matter 中的 HTML 不渲染；图片的网络、文件、解码限制沿用[图片预览](inline-images.md)。SVG 内部资源限制不变。
@@ -61,6 +66,7 @@ HTML 表格图片显示在对应单元格内。只包含图片、图片链接、
 自动验证覆盖：
 
 - 嵌套样式、中文与 emoji、完整实体、未知 / 未闭合 / 转义 / 代码内标签及安全链接。
+- HTML 六级标题与 Markdown 标题尺寸一致性、多行与缩进内容、嵌套样式、块间换行、标题级别变化的缓存刷新，以及标题中的中文组合输入 / 撤销。
 - 折叠开关、单行 / 多行摘要、嵌套折叠、无摘要默认标题，以及折叠正文中的代码块。
 - 表格合并单元格、标题保留、点击编辑、同长度内容修改后的缓存失效、继承样式和原文标记。
 - HTML 图片的相对路径、尺寸、顺序、对齐及单元格内显示，并复用既有图片加载回归。
@@ -70,12 +76,15 @@ Windows 实际执行 `./scripts/check.ps1`：258 项工作区测试、17 项发�
 
 徽章反馈修复先通过 GPUI 测试复现缺少行内图片组；修复后新增 3 项回归覆盖跨源码行的居中横排、窄窗口换行、显式 `br`、不同徽章链接、点击编辑、中文组合输入 / 撤销、源码切换、注释隐藏和混合内容回退。重新执行标准检查：261 项工作区测试（编辑器 156 项）、17 项发布工具测试、格式、版本资料及 Clippy 全部通过，忽略项不变。日志：`target/html-badges-workspace-check.log`。徽章布局证据来自 GPUI TestPlatform，不作为 macOS 原生验收证据。
 
+标题扩展新增 5 项回归，其中标题相邻边界测试实际复现了 `甲乙` 未换行的问题，修复后通过；同级 Markdown 尺寸、多行缩进、嵌套样式、缓存刷新、中文组合输入 / 撤销与源码切换均通过。应用保存测试加入大小写混合、引号与实体的 HTML 标题，确认 BOM + CRLF 字节保留。重新执行 `./scripts/check.ps1`：266 项工作区测试（应用 74、文档 16、编辑器 161、更新器 15）、17 项发布工具测试、版本资料、格式与 Clippy 全部通过，忽略项不变。日志：`target/html-headings-workspace-check.log`；输入证据仍为 TestPlatform，未新增系统输入法或 macOS 原生验收。
+
 检查期间 D 盘空间耗尽导致编译 / 链接中断。可重建的增量编译缓存已暂存至 `C:/Users/Administrator/AppData/Local/Temp/tiny-md-html-build-cache-20261027/`，保留恢复能力；释放空间后完整检查重跑通过。此操作未移动项目源码或文档。
 
 Windows 开发构建已启动示例；原生界面已检查文字样式、上下标、换行、对齐和折叠展开。用户按 Esc 停止 Computer Use 后停止界面自动操作，因此没有完成原生系统输入法、完整表格交互及全部界面验收。自动输入测试使用 GPUI TestPlatform，不能替代系统输入法验收。macOS 本次没有编译或运行证据，共用代码不等于已完成 macOS 原生验收。
 
 手动检查示例：[HTML 混排检查](../../fixtures/html-compatibility.md)。
 徽章反馈示例：[HTML 徽章混排](../../fixtures/html-badges.md)，使用用户提供的图片地址；实际远程图片是否成功仍取决于网络及上游响应。
+标题反馈示例：[HTML 标题](../../fixtures/html-headings.md)，包含六级标题、居中、嵌套样式、多行内容和源码编辑检查。
 Windows 可运行 `./scripts/run-windows.ps1 -Document './fixtures/html-compatibility.md'`；macOS 可运行 `cargo run --locked -p tiny-md -- fixtures/html-compatibility.md`。
 
 解析器接口依据：[html5gum DefaultEmitter](https://docs.rs/html5gum/0.8.4/html5gum/emitters/default/struct.DefaultEmitter.html)；块级 HTML 规则依据：[CommonMark HTML blocks](https://spec.commonmark.org/0.31.2/#html-blocks)。

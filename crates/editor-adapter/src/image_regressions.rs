@@ -62,7 +62,9 @@ fn html_badges_share_one_centered_row_and_wrap_at_viewport_width(cx: &mut TestAp
     assert!((f32::from((first.origin.x + third.right()) / 2.0 - group.center().x)).abs() < 1.0);
     cx.read(|cx| {
         let editor = editor.read(cx);
-        assert_eq!(editor.layout[0].height, 0.0, "HTML comments are invisible");
+        assert_eq!(editor.layout[0].plan.visible, "<!-- Badges -->");
+        assert_eq!(editor.layout[0].visual_rows(), 1);
+        assert!(editor.layout[0].height >= editor.layout[0].line_h);
         assert!(editor.layout[2..10].iter().all(|row| row.height == 0.0));
         assert_eq!(editor.text(), source);
     });

@@ -1,6 +1,90 @@
 use super::*;
 
 #[test]
+fn functional_html_marks_keep_source_and_inline_break_behavior() {
+    for source in [
+        "<br/>",
+        " <BR /> ",
+        "<br>",
+        "<!-- hello -->",
+        "<!-- **中文** &amp; <br/> -->",
+    ] {
+        let plan = fragment_plan(source, false).0;
+        assert_eq!(plan.visible, source);
+        for (byte, _) in source.char_indices() {
+            assert_eq!(vis_for_src(&plan.segs, byte), byte);
+            assert_eq!(src_for_vis(&plan.segs, byte), byte);
+        }
+    }
+    assert_eq!(
+        fragment_plan("甲<br/>乙<br>丙", false).0.visible,
+        "甲\n乙\n丙"
+    );
+    let source = "<!-- 多行\n    **文字** &amp; <br/>\n-->";
+    let doc = Document::parse(source, parse_root(source).as_ref());
+    for (line, text) in source.lines().enumerate() {
+        let plan = doc
+            .plan(text, doc.offsets[line], &Block::Paragraph, None, false, &[])
+            .0;
+        assert_eq!(plan.visible, text);
+    }
+}
+
+#[test]
+fn functional_html_marks_preserve_code_and_hidden_container_boundaries() {
+    for source in [
+        "`<br/>`",
+        "`<!-- hello -->`",
+        "\\<br/>",
+        "\\<!-- hello -->",
+        "<!-- 未完成",
+    ] {
+        let (_, styles) = fragment_plan(source, false);
+        assert!(
+            styles.iter().all(|style| style.annotation.is_none()),
+            "{source}"
+        );
+    }
+    let source = "<details>\n<summary>折叠</summary>\n<!-- hello -->\n<br/>\n</details>";
+    let doc = Document::parse(source, parse_root(source).as_ref());
+    for line in [2, 3] {
+        let text = source.lines().nth(line).unwrap();
+        assert_eq!(
+            doc.plan(text, doc.offsets[line], &Block::Paragraph, None, false, &[])
+                .0
+                .visible,
+            text
+        );
+        assert!(
+            doc.plan(
+                text,
+                doc.offsets[line],
+                &Block::Paragraph,
+                None,
+                false,
+                &[doc.details[0].body.clone()]
+            )
+            .0
+            .visible
+            .is_empty()
+        );
+    }
+    let source = "<table><tr><td>甲\n<br/>\n乙</td></tr></table>";
+    let doc = Document::parse(source, parse_root(source).as_ref());
+    let cell = &doc.tables[0].cells[0];
+    let (plan, extra) = doc.plan(
+        &source[cell.content.clone()],
+        cell.content.start,
+        &Block::Paragraph,
+        None,
+        false,
+        &[],
+    );
+    assert!(!plan.visible.contains("<br"));
+    assert!(extra.iter().all(|style| style.annotation.is_none()));
+}
+
+#[test]
 fn nested_styles_entities_and_source_mapping() {
     let source = "中文 <strong><u>粗线</u></strong> &amp; &#x1f331;";
     let (p, extras) = fragment_plan(source, false);
@@ -174,7 +258,9 @@ fn html_badge_groups_do_not_hide_mixed_text_or_unsupported_content() {
     assert_eq!(doc.image_groups.len(), 1);
     assert_eq!(doc.image_groups[0].align, 1);
     assert!(doc.link_at(source.find("<img").unwrap()).is_none());
-    assert_eq!(fragment_plan("<!-- Badges -->", false).0.visible, "");
+    let (comment, style) = fragment_plan("<!-- Badges -->", false);
+    assert_eq!(comment.visible, "<!-- Badges -->");
+    assert_eq!(style[0].annotation, Some(Annotation::Comment));
     assert_eq!(
         fragment_plan("<!-- Badges -->", true).0.visible,
         "<!-- Badges -->"
@@ -185,4 +271,40 @@ fn html_badge_groups_do_not_hide_mixed_text_or_unsupported_content() {
             .visible
             .contains("<!-- Badges -->")
     );
+}
+
+#[test]
+fn html_headings_keep_literal_markers_code_and_incomplete_tags() {
+    let source = "<H3 id='title' style='color:#c00'><u>**标题**</u></H3>";
+    let (plan, extra) = fragment_plan(source, false);
+    assert_eq!(plan.visible, "**标题**");
+    assert!(matches!(plan.kind, layout::RowKind::Heading(3)));
+    assert!(
+        extra
+            .iter()
+            .any(|style| style.underline && style.color == Some(0xcc0000))
+    );
+    assert_eq!(fragment_plan(source, true).0.visible, source);
+    for source in [
+        "<h3>正在输入",
+        "<h3>错配</h2>",
+        "`<h3>示例</h3>`",
+        "\\<h3>转义</h3>",
+    ] {
+        let plan = fragment_plan(source, false).0;
+        assert!(!matches!(plan.kind, layout::RowKind::Heading(_)));
+        assert!(plan.visible.contains("<h3>"));
+    }
+}
+
+#[test]
+fn html_headings_keep_block_boundaries_and_body_text_size() {
+    let (plan, _) = fragment_plan("<h3>甲</h3><h3>乙</h3>", false);
+    assert_eq!(plan.visible, "甲\n乙");
+    assert!(matches!(plan.kind, layout::RowKind::Heading(3)));
+    let (plan, _) = fragment_plan("<h3>标题</h3>正文", false);
+    assert_eq!(plan.visible, "标题\n正文");
+    assert!(matches!(plan.kind, layout::RowKind::Paragraph));
+    assert!(plan.runs.first().unwrap().style.bold);
+    assert!(!plan.runs.last().unwrap().style.bold);
 }

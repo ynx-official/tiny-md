@@ -3,6 +3,259 @@ use gpui::TestAppContext;
 use gpui::{EntityInputHandler, ScrollDelta, ScrollWheelEvent, size};
 
 #[gpui::test]
+fn functional_html_marks_have_one_clickable_row_and_keep_ime_undo(cx: &mut TestAppContext) {
+    cx.update(|cx| guise::Theme::light().init(cx));
+    let source = "正文\n<br/>\n<!-- hello 中文🌱 -->\n后文";
+    let (editor, cx) = cx.add_window_view(|window, cx| {
+        let editor = MarkdownEditor::new(cx).value(source);
+        window.focus(&editor.focus);
+        editor
+    });
+    cx.update(|window, _| window.activate_window());
+    draw(cx);
+    let position = cx.read(|app| {
+        let editor = editor.read(app);
+        for line in [1, 2] {
+            let row = &editor.layout[line];
+            assert_eq!(row.plan.visible, source.lines().nth(line).unwrap());
+            assert_eq!(row.visual_rows(), 1);
+            assert_eq!(row.height, editor.layout[3].height);
+        }
+        let row = &editor.layout[2];
+        editor.text_bounds.origin + point(px(2.0), px(row.y.get() + row.height / 2.0))
+    });
+    cx.simulate_click(position, gpui::Modifiers::none());
+    draw(cx);
+    cx.update(|window, app| {
+        editor.update(app, |editor, cx| {
+            assert_eq!(editor.model.cursor().line, 2);
+            editor.edit(cx, |model| model.move_to(2, "<!-- ".chars().count(), false));
+            editor.replace_and_mark_text_in_range(None, "pinyin", Some(6..6), window, cx);
+        })
+    });
+    draw(cx);
+    cx.update(|window, app| {
+        editor.update(app, |editor, cx| {
+            assert_painted_caret_at_cursor(editor, window, cx);
+            editor.replace_text_in_range(None, "输入法", window, cx);
+        })
+    });
+    draw(cx);
+    cx.read(|cx| {
+        assert_eq!(
+            editor.read(cx).text(),
+            source.replace("hello", "输入法hello")
+        )
+    });
+    editor.update(cx, |editor, cx| editor.set_source_mode(true, cx));
+    draw(cx);
+    editor.update(cx, |editor, cx| editor.set_source_mode(false, cx));
+    cx.dispatch_action(actions::Undo);
+    draw(cx);
+    cx.read(|cx| assert_eq!(editor.read(cx).text(), source));
+    editor.update(cx, |editor, cx| {
+        editor.edit(cx, |model| {
+            model.move_to(1, 0, false);
+            model.move_to(2, source.lines().nth(2).unwrap().chars().count(), true);
+        })
+    });
+    draw(cx);
+    cx.read(|cx| {
+        assert_eq!(
+            editor.read(cx).model.copy().as_deref(),
+            Some("<br/>\n<!-- hello 中文🌱 -->")
+        )
+    });
+}
+
+#[gpui::test]
+fn functional_html_marks_keep_neutrino_sample_layout(cx: &mut TestAppContext) {
+    cx.update(|cx| guise::Theme::light().init(cx));
+    let source = include_str!("../../../fixtures/html-functional-markers.md");
+    let (editor, cx) = cx.add_window_view(|_, cx| {
+        let mut editor = MarkdownEditor::new(cx).value(source).read_only(true);
+        let doc = crate::html::Document::parse(source, crate::html::parse_root(source).as_ref());
+        // Decode/load behavior has separate tests; fixed image sizes keep this layout
+        // regression deterministic while retaining every original URL and source byte.
+        for image in doc.image_tags() {
+            let target = &image.attrs["src"];
+            let (w, h) = if target.starts_with("assets/") {
+                (720, 180)
+            } else {
+                (100, 20)
+            };
+            let buffer = image::RgbaImage::from_pixel(w, h, image::Rgba([0, 0, 0, 255]));
+            editor.images.entries.insert(
+                target.clone(),
+                editor_images::State::Ready(std::sync::Arc::new(gpui::RenderImage::new(vec![
+                    image::Frame::new(buffer),
+                ]))),
+            );
+        }
+        editor
+    });
+    cx.simulate_resize(size(px(900.0), px(1200.0)));
+    draw(cx);
+    cx.read(|cx| {
+        let editor = editor.read(cx);
+        for (i, line) in source.lines().enumerate() {
+            if line.starts_with("<!--") || line == "<br/>" {
+                let row = &editor.layout[i];
+                assert_eq!(row.plan.visible, line);
+                assert!(row.height > 0.0);
+                assert_eq!(row.visual_rows(), 1);
+            }
+        }
+        assert_eq!(editor.text(), source);
+        assert!(matches!(editor.layout[7].plan.kind, RowKind::Heading(3)));
+        assert_eq!(editor.layout[7].align, TextAlign::Center);
+        let parsed = editor.document_cache.current().unwrap();
+        assert_eq!(parsed.html.image_groups.len(), 2);
+        assert_eq!(parsed.html.image_groups[1].align, 1);
+        assert_eq!(parsed.html.image_tags().count(), 5);
+    });
+    let second = cx.debug_bounds("html-inline-image-1").unwrap();
+    let third = cx.debug_bounds("html-inline-image-2").unwrap();
+    let fourth = cx.debug_bounds("html-inline-image-3").unwrap();
+    assert_eq!(second.origin.y, third.origin.y);
+    assert_eq!(third.origin.y, fourth.origin.y);
+}
+
+#[gpui::test]
+fn html_headings_match_markdown_levels_without_changing_source(cx: &mut TestAppContext) {
+    cx.update(|cx| guise::Theme::light().init(cx));
+    let source = (1..=6)
+        .flat_map(|level| {
+            [
+                format!("<h{level}>中文标题 🌱</h{level}>"),
+                String::new(),
+                format!("{} 中文标题 🌱", "#".repeat(level)),
+                String::new(),
+            ]
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let (editor, cx) =
+        cx.add_window_view(|_, cx| MarkdownEditor::new(cx).value(&source).read_only(true));
+    draw(cx);
+    cx.read(|cx| {
+        let editor = editor.read(cx);
+        for level in 1..=6 {
+            let html = &editor.layout[(level - 1) * 4];
+            let markdown = &editor.layout[(level - 1) * 4 + 2];
+            assert_eq!(html.plan.visible, "中文标题 🌱");
+            assert!(matches!(html.plan.kind, RowKind::Heading(n) if n == level as u8));
+            assert_eq!(html.line_h, markdown.line_h);
+            assert_eq!(html.pad_top, markdown.pad_top);
+            assert_eq!(html.height, markdown.height);
+        }
+        assert_eq!(editor.text(), source);
+    });
+}
+
+#[gpui::test]
+fn html_headings_support_multiline_content_and_nested_styles(cx: &mut TestAppContext) {
+    cx.update(|cx| guise::Theme::light().init(cx));
+    let source = "<h3 align='center'>\n    <em>中文</em> &amp; 标题\n</h3>\n\n正文";
+    let (editor, cx) =
+        cx.add_window_view(|_, cx| MarkdownEditor::new(cx).value(source).read_only(true));
+    draw(cx);
+    cx.read(|cx| {
+        let editor = editor.read(cx);
+        assert_eq!(editor.layout[0].height, 0.0);
+        assert_eq!(editor.layout[2].height, 0.0);
+        let row = &editor.layout[1];
+        assert_eq!(row.plan.visible.trim(), "中文 & 标题");
+        assert!(matches!(row.plan.kind, RowKind::Heading(3)));
+        assert_eq!(row.align, TextAlign::Center);
+        assert!(
+            row.plan
+                .runs
+                .iter()
+                .any(|run| run.style.bold && run.style.italic)
+        );
+        assert!(matches!(editor.layout[4].plan.kind, RowKind::Paragraph));
+        assert_eq!(editor.text(), source);
+    });
+    // The content line is unchanged, but the surrounding heading level changed.
+    let before = cx.read(|cx| editor.read(cx).layout[1].line_h);
+    editor.update(cx, |editor, cx| {
+        editor.apply_external_text(&source.replace("h3", "h2"), cx);
+    });
+    draw(cx);
+    cx.read(|cx| {
+        let row = &editor.read(cx).layout[1];
+        assert!(matches!(row.plan.kind, RowKind::Heading(2)));
+        assert!(row.line_h > before);
+    });
+}
+
+#[gpui::test]
+fn html_headings_keep_chinese_composition_source_mode_and_undo(cx: &mut TestAppContext) {
+    cx.update(|cx| guise::Theme::light().init(cx));
+    let source = "Intro\n\n<h3 align='center'>原文🌱</h3>";
+    let (editor, cx) = cx.add_window_view(|window, cx| {
+        let editor = MarkdownEditor::new(cx).value(source);
+        window.focus(&editor.focus);
+        editor
+    });
+    draw(cx);
+    cx.read(|cx| {
+        assert!(matches!(
+            editor.read(cx).layout[2].plan.kind,
+            RowKind::Heading(3)
+        ));
+    });
+    editor.update(cx, |editor, cx| {
+        editor.edit(cx, |model| {
+            model.move_to(2, "<h3 align='center'>".chars().count(), false)
+        });
+    });
+    draw(cx);
+    cx.read(|cx| {
+        assert_eq!(
+            editor.read(cx).layout[2].plan.visible,
+            source.lines().nth(2).unwrap()
+        );
+    });
+    cx.update(|window, app| {
+        editor.update(app, |editor, cx| {
+            editor.replace_and_mark_text_in_range(None, "pinyin", Some(6..6), window, cx);
+        });
+    });
+    draw(cx);
+    cx.update(|window, app| {
+        editor.update(app, |editor, cx| {
+            let range = editor.ime.marked().unwrap();
+            assert!(
+                editor
+                    .bounds_for_range(range, Bounds::default(), window, cx)
+                    .is_some()
+            );
+            editor.replace_text_in_range(None, "中文", window, cx);
+        });
+    });
+    draw(cx);
+    cx.read(|cx| assert_eq!(editor.read(cx).text(), source.replace("原文", "中文原文")));
+    editor.update(cx, |editor, cx| editor.set_source_mode(true, cx));
+    draw(cx);
+    cx.read(|cx| assert!(editor.read(cx).layout[2].plan.visible.contains("<h3")));
+    editor.update(cx, |editor, cx| editor.set_source_mode(false, cx));
+    cx.dispatch_action(actions::Undo);
+    draw(cx);
+    cx.read(|cx| assert_eq!(editor.read(cx).text(), source));
+    editor.update(cx, |editor, cx| {
+        editor.edit(cx, |model| model.move_to(0, 0, false))
+    });
+    draw(cx);
+    cx.read(|cx| {
+        let row = &editor.read(cx).layout[2];
+        assert_eq!(row.plan.visible, "原文🌱");
+        assert!(matches!(row.plan.kind, RowKind::Heading(3)));
+    });
+}
+
+#[gpui::test]
 fn html_inline_preview_preserves_source_and_renders_text(cx: &mut TestAppContext) {
     cx.update(|cx| guise::Theme::light().init(cx));
     let source = "中文 <strong>加粗</strong> &amp; <u>下划线</u><br>下一行";

@@ -23,7 +23,7 @@
 | [输入光标同步](04-quality/input-caret-synchronization.md) | 快速输入、换行与自动滚动的光标坐标修复及组合输入回归 |
 | [Markdown 交互](04-quality/markdown-interactions.md) | 复选框原位勾选、链接手形光标、表格与换行链接、只读与源码模式边界 |
 | [图片内嵌预览](04-quality/inline-images.md) | 本地相对路径与 HTTP/HTTPS、后台加载、编辑 / 源码切换、资源回收与跨平台验证边界 |
-| [HTML 混排兼容](04-quality/html-compatibility.md) | 常见标签、徽章横排与链接、折叠与 HTML 表格、源码保存及中文输入 / 撤销回归 |
+| [HTML 混排兼容](04-quality/html-compatibility.md) | HTML 标题、常见标签、徽章横排与链接、折叠与 HTML 表格、源码保存及中文输入 / 撤销回归 |
 | [段落空行间距](04-quality/paragraph-spacing.md) | Windows / macOS 共用的分隔空行高度、连续空行与源码边界、应用配置与编辑缓存回归 |
 | [正文滚动条](04-quality/document-scrollbar.md) | 窗口最右侧窄滚动条、内容长度与滚动位置、渲染缓存同步及模式 / 主题回归 |
 | [大纲章节定位](04-quality/outline-navigation.md) | 双向跳转顶端对齐、已可见章节重定位、源码 / 打字机模式与文末范围 |

@@ -17,7 +17,7 @@
 
 🖼️ **图片内嵌预览**，支持相对于 Markdown 文件的本地图片路径及 HTTP/HTTPS 图片，按正文宽度等比显示。
 
-📄 **HTML 混排**，支持常见文字标签、换行、图片尺寸与对齐、折叠内容和 HTML 表格，保存保留原始源码。支持范围见 [HTML 兼容说明](docs/04-quality/html-compatibility.md)。
+📄 **HTML 混排**，支持 `h1`–`h6` 标题、常见文字标签、换行、图片尺寸与对齐、折叠内容和 HTML 表格，保存保留原始源码。支持范围见 [HTML 兼容说明](docs/04-quality/html-compatibility.md)。
 
 🧭 **文档导航**，文档列表、目录树、大纲与查找替换。
 

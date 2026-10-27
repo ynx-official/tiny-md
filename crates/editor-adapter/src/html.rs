@@ -10,6 +10,12 @@ use html5gum::{Token, Tokenizer, emitters::default::DefaultEmitter};
 use markdown::mdast::Node;
 use std::{collections::HashMap, ops::Range};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum Annotation {
+    Comment,
+    Break,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub(crate) struct Style {
     pub bold: bool,
@@ -23,6 +29,8 @@ pub(crate) struct Style {
     pub background: Option<u32>,
     pub align: Option<u8>,
     pub link: Option<String>,
+    pub heading: Option<u8>,
+    pub annotation: Option<Annotation>,
 }
 
 #[derive(Clone, Debug)]
@@ -98,36 +106,44 @@ pub(crate) fn parse_root(source: &str) -> Option<Node> {
 }
 
 fn supported(name: &str) -> bool {
-    matches!(
-        name,
-        "br" | "img"
-            | "b"
-            | "strong"
-            | "i"
-            | "em"
-            | "del"
-            | "s"
-            | "code"
-            | "u"
-            | "mark"
-            | "sub"
-            | "sup"
-            | "kbd"
-            | "a"
-            | "p"
-            | "div"
-            | "span"
-            | "details"
-            | "summary"
-            | "table"
-            | "thead"
-            | "tbody"
-            | "tfoot"
-            | "tr"
-            | "td"
-            | "th"
-            | "caption"
-    )
+    heading_level(name).is_some()
+        || matches!(
+            name,
+            "br" | "img"
+                | "b"
+                | "strong"
+                | "i"
+                | "em"
+                | "del"
+                | "s"
+                | "code"
+                | "u"
+                | "mark"
+                | "sub"
+                | "sup"
+                | "kbd"
+                | "a"
+                | "p"
+                | "div"
+                | "span"
+                | "details"
+                | "summary"
+                | "table"
+                | "thead"
+                | "tbody"
+                | "tfoot"
+                | "tr"
+                | "td"
+                | "th"
+                | "caption"
+        )
+}
+
+fn heading_level(name: &str) -> Option<u8> {
+    match name.as_bytes() {
+        [b'h', level @ b'1'..=b'6'] => Some(level - b'0'),
+        _ => None,
+    }
 }
 
 pub(crate) fn safe_link(value: &str) -> bool {
@@ -178,7 +194,9 @@ fn alignment(value: &str) -> Option<u8> {
 
 fn tag_style(tag: &Tag) -> Style {
     let mut s = Style {
-        bold: matches!(tag.name.as_str(), "b" | "strong" | "th" | "summary"),
+        bold: matches!(tag.name.as_str(), "b" | "strong" | "th" | "summary")
+            || heading_level(&tag.name).is_some(),
+        heading: heading_level(&tag.name),
         italic: matches!(tag.name.as_str(), "i" | "em"),
         strike: matches!(tag.name.as_str(), "del" | "s"),
         code: matches!(tag.name.as_str(), "code" | "kbd"),
@@ -346,6 +364,13 @@ impl Document {
                                         let range =
                                             range.start + span.start..range.start + span.end;
                                         result.comments.push(range.clone());
+                                        result.styles.push((
+                                            range.clone(),
+                                            Style {
+                                                annotation: Some(Annotation::Comment),
+                                                ..Default::default()
+                                            },
+                                        ));
                                         result.replacements.push(Replacement {
                                             range,
                                             text: String::new(),
@@ -427,10 +452,41 @@ impl Document {
                     .styles
                     .push((tag.range.end..close.range.start, tag_style(tag)));
             }
+            if tag.name == "br" && !tag.close {
+                let line = result.line(tag.range.start);
+                let start = result.offsets[line];
+                let end = source[tag.range.end..]
+                    .find('\n')
+                    .map_or(source.len(), |n| tag.range.end + n);
+                // A standalone break is an editable spacing instruction. Inline
+                // and table-cell breaks remain actual line breaks in their content.
+                if source[start..tag.range.start].trim().is_empty()
+                    && source[tag.range.end..end].trim().is_empty()
+                    && !result.tags.iter().any(|parent| {
+                        parent.name == "table"
+                            && !parent.close
+                            && parent.range.start < tag.range.start
+                            && parent
+                                .mate
+                                .is_some_and(|mate| result.tags[mate].range.end > tag.range.end)
+                    })
+                {
+                    result.styles.push((
+                        tag.range.clone(),
+                        Style {
+                            annotation: Some(Annotation::Break),
+                            ..Default::default()
+                        },
+                    ));
+                }
+            }
         }
-        // Inline p/div boundaries produce real line breaks without modifying the source line.
+        // Block boundaries produce real line breaks without modifying the source line.
         for tag in &result.tags {
-            if tag.close && matches!(tag.name.as_str(), "p" | "div") && tag.mate.is_some() {
+            if tag.close
+                && (matches!(tag.name.as_str(), "p" | "div") || heading_level(&tag.name).is_some())
+                && tag.mate.is_some()
+            {
                 let rest = source[tag.range.end..].split('\n').next().unwrap_or("");
                 if !rest.trim().is_empty()
                     && !rest.trim_start().starts_with("</")
@@ -693,6 +749,21 @@ impl Document {
             .unwrap_or(0)
     }
 
+    pub fn heading_at(&self, offset: usize) -> Option<u8> {
+        self.styles
+            .iter()
+            .filter(|(range, _)| range.contains(&offset))
+            .filter_map(|(_, style)| style.heading)
+            .next_back()
+    }
+
+    pub fn annotation_at(&self, offset: usize) -> Option<Annotation> {
+        self.styles
+            .iter()
+            .filter(|(range, _)| range.contains(&offset))
+            .find_map(|(_, style)| style.annotation)
+    }
+
     pub fn link_at(&self, offset: usize) -> Option<String> {
         self.styles
             .iter()
@@ -915,11 +986,24 @@ impl Document {
                 extra.background = s.background.or(extra.background);
                 extra.align = s.align.or(extra.align);
                 extra.link = s.link.clone().or(extra.link);
+                extra.heading = s.heading.or(extra.heading);
+                extra.annotation = s.annotation.or(extra.annotation);
+            }
+            if let Some(annotation) = extra.annotation {
+                // Comment contents are literal, even inside an emphasized span or
+                // heading; markup/entities in a comment must never become content.
+                inline = InlineStyle::default();
+                extra = Style {
+                    annotation: Some(annotation),
+                    ..Default::default()
+                };
             }
             let hidden_source = hidden.iter().any(|r| r.contains(&absolute));
             let base_hidden = base_seg.is_some_and(|seg| seg.vis.is_empty());
             let text = if hidden_source {
                 ""
+            } else if extra.annotation.is_some() {
+                &source[byte..next]
             } else if let Some(r) = replacement {
                 if r.range.start == absolute {
                     &r.text
@@ -950,6 +1034,20 @@ impl Document {
                 });
                 extras.push(extra);
             }
+        }
+        // A row gets heading metrics only when all of its visible text belongs
+        // to the same heading. Adjacent body text must not inherit its font size.
+        let mut start = 0;
+        let mut levels = out.runs.iter().zip(&extras).filter_map(|(run, style)| {
+            let end = start + run.len;
+            let nonempty = style.annotation.is_none() && !out.visible[start..end].trim().is_empty();
+            start = end;
+            nonempty.then_some(style.heading)
+        });
+        if let Some(Some(level)) = levels.next()
+            && levels.all(|candidate| candidate == Some(level))
+        {
+            out.kind = layout::RowKind::Heading(level);
         }
         (out, extras)
     }

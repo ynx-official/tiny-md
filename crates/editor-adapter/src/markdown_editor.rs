@@ -41,7 +41,7 @@ use gpui::{
 use guise::actions;
 use guise::overlay::ContextMenu;
 
-use crate::html::{src_for_vis, vis_for_src};
+use crate::html::{Annotation, src_for_vis, vis_for_src};
 use crate::shaped_text::ShapedText;
 use guise::editor::{EditorModel, Pos, TokenKind, token_color};
 use guise::markdown::block::{Block, DocState, classify};
@@ -216,6 +216,7 @@ struct CellStyle {
     accent: Hsla,
     code_bg: Hsla,
     highlight_bg: Hsla,
+    comment: Hsla,
 }
 
 fn shape_table_cell(
@@ -252,12 +253,12 @@ fn shape_planned_cell(
         .map(|(run, extra)| TextRun {
             len: run.len,
             font: Font {
-                family: if run.style.code {
+                family: if run.style.code || extra.annotation.is_some() {
                     MONO_FAMILY.into()
                 } else {
                     style.font.family.clone()
                 },
-                weight: if header || run.style.bold {
+                weight: if extra.annotation.is_none() && (header || run.style.bold) {
                     FontWeight::BOLD
                 } else {
                     style.font.weight
@@ -269,7 +270,12 @@ fn shape_planned_cell(
                 },
                 ..style.font.clone()
             },
-            color: if run.marker {
+            color: if let Some(annotation) = extra.annotation {
+                match annotation {
+                    Annotation::Comment => style.comment,
+                    Annotation::Break => style.dimmed,
+                }
+            } else if run.marker {
                 style.dimmed
             } else if run.style.link {
                 style.accent
@@ -1827,6 +1833,9 @@ impl MarkdownEditor {
         let text_color = style.text.unwrap_or_else(|| t.text().hsla());
         let dimmed = t.dimmed().hsla();
         let marker_color = t.dimmed().alpha(0.75);
+        let comment_color = t
+            .color(guise::theme::ColorName::Yellow, if is_dark { 4 } else { 7 })
+            .hsla();
         let accent = style.accent.unwrap_or_else(|| t.primary().hsla());
         let caret_color = style.caret.unwrap_or(text_color);
         let selection_bg = style.selection.unwrap_or_else(|| t.primary().alpha(0.25));
@@ -1964,6 +1973,7 @@ impl MarkdownEditor {
             accent,
             code_bg,
             highlight_bg,
+            comment: comment_color,
         };
         let blocks = if self.source_mode {
             &parsed.code[..0]
@@ -2289,6 +2299,7 @@ impl MarkdownEditor {
                     code_bg,
                     highlight_bg,
                     quote_text,
+                    comment_color,
                 ],
                 token_colors.to_vec(),
             ]
@@ -2329,6 +2340,13 @@ impl MarkdownEditor {
                         });
             let block = if self.source_mode || html_editing {
                 Block::CodeLine
+            } else if matches!(parsed.blocks[i], Block::CodeLine)
+                && (parsed.html.heading_at(parsed.html.offsets[i]).is_some()
+                    || parsed.html.annotation_at(parsed.html.offsets[i]).is_some())
+            {
+                // Indentation inside HTML headings/comments belongs to that HTML.
+                // Source mode still shows it verbatim.
+                Block::Paragraph
             } else {
                 parsed.blocks[i].clone()
             };
@@ -2521,12 +2539,12 @@ impl MarkdownEditor {
                     .map(|(run, extra)| {
                         let s = run.style;
                         let font = Font {
-                            family: if s.code {
+                            family: if s.code || extra.annotation.is_some() {
                                 MONO_FAMILY.into()
                             } else {
                                 prose.family.clone()
                             },
-                            weight: if heading || s.bold {
+                            weight: if extra.annotation.is_none() && (heading || s.bold) {
                                 FontWeight::BOLD
                             } else {
                                 prose.weight
@@ -2538,7 +2556,12 @@ impl MarkdownEditor {
                             },
                             ..prose.clone()
                         };
-                        let color = if run.marker {
+                        let color = if let Some(annotation) = extra.annotation {
+                            match annotation {
+                                Annotation::Comment => comment_color,
+                                Annotation::Break => marker_color,
+                            }
+                        } else if run.marker {
                             marker_color
                         } else if run.dim {
                             dimmed

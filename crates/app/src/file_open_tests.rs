@@ -34,7 +34,7 @@ pub(super) fn assert_opened(cx: &App, path: &Path, text: &str) {
 fn html_preview_and_save_preserve_original_html_bytes(cx: &mut TestAppContext) {
     init(cx);
     let directory = tempfile::tempdir().unwrap();
-    let text = "<p align='center'>中文 &amp; 🌱</p>\r\n<details open><summary>说明</summary><table><tr><td colspan='2'>原文</td></tr></table></details>\r\n";
+    let text = "<!-- Logo 中文 &amp; -->\r\n<p align='center'>中文 &amp; 🌱</p>\r\n<H3 align='center' id=\"原始标题\">中文 &amp; <em>🌱</em></H3>\r\n<br/>\r\n<details open><summary>说明</summary><table><tr><td colspan='2'>原文</td></tr></table></details>\r\n<BR />\r\n";
     let mut bytes = vec![0xef, 0xbb, 0xbf];
     bytes.extend_from_slice(text.as_bytes());
     let path = directory.path().join("html.md");
