@@ -39,7 +39,7 @@
 | [v0.2.10 版本详情](06-delivery/versions/v0.2.10.md) | 流程图闲置缓存回收与多循环主线布局优化 |
 | [v0.2.11 版本详情](06-delivery/versions/v0.2.11.md) | 大纲章节定位与侧栏当前文档定位 |
 | [v0.2.13 版本详情](06-delivery/versions/v0.2.13.md) | Markdown 本地与远程图片内嵌预览 |
-| [v0.2.14 版本详情](06-delivery/versions/v0.2.14.md) | Markdown 中常见 HTML 标签、标题、表格、折叠与可见功能标记 |
+| [v0.2.14 版本详情](06-delivery/versions/v0.2.14.md) | Markdown HTML 混排、可见功能标记及 SVG 字体内存优化 |
 | [v0.2.12 未发布记录](99-archive/v0.2.12-failed-release.md) | Clippy 检查失败与补丁版本替代 |
 | [v0.2.8 未发布记录](99-archive/v0.2.8-failed-release.md) | CI Clippy 失败、未公开 Release 与替代版本 |
 | [v0.2.7 版本详情](06-delivery/versions/v0.2.7.md) | 双平台段落空行修复与本次跳过测试的发布记录 |
