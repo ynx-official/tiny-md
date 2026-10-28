@@ -440,16 +440,11 @@ impl TinyMd {
                     this.apply_file_change(&path, change, window, cx);
                     let recent = &mut cx.global_mut::<Session>().recent;
                     match change {
-                        FileChange::Renamed(new) => {
-                            for item in recent {
-                                if *item == path {
-                                    *item = new.clone();
-                                }
-                            }
-                        }
-                        FileChange::Deleted => recent.retain(|item| *item != path),
+                        FileChange::Renamed(new) => recent.rename(&path, new),
+                        FileChange::Deleted => recent.remove(&path),
                         FileChange::Duplicated => {}
                     }
+                    cx.refresh_windows();
                     this.error = false;
                     this.status = match change {
                         FileChange::Renamed(_) => "已重命名",

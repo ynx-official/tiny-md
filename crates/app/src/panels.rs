@@ -51,7 +51,7 @@ impl TinyMd {
         self.library_request += 1;
         let request = self.library_request;
         let root = self.library_root.clone();
-        let recent = cx.global::<Session>().recent.clone();
+        let recent = cx.global::<Session>().recent.paths.clone();
         let task = cx
             .background_executor()
             .spawn(async move { library::load(root.as_deref(), recent) });

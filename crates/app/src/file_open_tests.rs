@@ -9,6 +9,116 @@ pub(super) fn init(cx: &mut TestAppContext) {
     });
 }
 
+#[gpui::test]
+fn recent_history_keeps_twenty_files_and_moves_reopened_files_to_front(cx: &mut TestAppContext) {
+    init(cx);
+    let directory = tempfile::tempdir().unwrap();
+    let paths = (0..22)
+        .map(|index| note(directory.path(), &format!("note-{index}.md"), "note"))
+        .collect::<Vec<_>>();
+    cx.update(|cx| {
+        for path in &paths {
+            remember(path, cx);
+        }
+        remember(&paths[10], cx);
+        let recent = &cx.global::<Session>().recent.paths;
+        assert_eq!(recent.len(), 20);
+        assert_eq!(recent.first(), Some(&paths[10]));
+        assert_eq!(recent.iter().filter(|path| **path == paths[10]).count(), 1);
+        assert!(!recent.contains(&paths[0]));
+    });
+}
+
+#[gpui::test]
+fn recent_history_persists_open_switch_save_as_and_clear_without_editing_the_note(
+    cx: &mut TestAppContext,
+) {
+    init(cx);
+    let directory = tempfile::tempdir().unwrap();
+    let store = directory.path().join("config/recent-files.json");
+    let first = note(directory.path(), "first.md", "first");
+    let second = note(directory.path(), "second.md", "second");
+    let saved = directory.path().join("saved.md");
+    cx.update(|cx| {
+        cx.global_mut::<Session>().recent = recent_files::RecentFiles::load_at(store.clone())
+    });
+    let (view, cx) = cx.add_window_view(|window, cx| TinyMd::new(Some(first.clone()), window, cx));
+    assert_eq!(
+        recent_files::RecentFiles::load_at(store.clone()).paths,
+        std::slice::from_ref(&first)
+    );
+    cx.update(|window, cx| {
+        view.update(cx, |this, cx| {
+            this.request(Intent::SwitchPath(second.clone()), window, cx)
+        })
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        recent_files::RecentFiles::load_at(store.clone()).paths,
+        [second.clone(), first.clone()]
+    );
+    cx.update(|window, cx| {
+        view.update(cx, |this, cx| {
+            this.write(Some(saved.clone()), None, window, cx)
+        })
+    });
+    cx.run_until_parked();
+    let saved = std::fs::canonicalize(saved).unwrap();
+    assert_eq!(
+        recent_files::RecentFiles::load_at(store.clone()).paths,
+        [saved, second, first]
+    );
+    cx.update(|_, cx| {
+        view.read(cx).editor.clone().update(cx, |editor, cx| {
+            editor.command(EditorCommand::Wrap("**"), cx)
+        })
+    });
+    cx.run_until_parked();
+    cx.dispatch_action(ClearRecentFiles);
+    cx.run_until_parked();
+    assert!(recent_files::RecentFiles::load_at(store).paths.is_empty());
+    assert_eq!(
+        cx.read(|cx| view.read(cx).editor.read(cx).text()),
+        "**second**"
+    );
+    assert!(cx.read(|cx| view.read(cx).dirty));
+    cx.dispatch_action(guise::actions::Undo);
+    assert_eq!(cx.read(|cx| view.read(cx).editor.read(cx).text()), "second");
+}
+
+#[gpui::test]
+fn recent_path_action_survives_reordering_and_missing_file_keeps_current_note(
+    cx: &mut TestAppContext,
+) {
+    init(cx);
+    let directory = tempfile::tempdir().unwrap();
+    let first = note(directory.path(), "first.md", "first");
+    let second = note(directory.path(), "second.md", "second");
+    let missing = directory.path().join("missing.md");
+    let (view, cx) = cx.add_window_view(|window, cx| TinyMd::new(Some(first.clone()), window, cx));
+    let action = OpenRecentFile {
+        path: second.clone(),
+    };
+    cx.update(|_, cx| {
+        remember(&second, cx);
+        remember(&first, cx);
+    });
+    cx.dispatch_action(action);
+    cx.run_until_parked();
+    cx.read(|cx| assert_opened(cx, &second, "second"));
+    cx.dispatch_action(OpenRecentFile {
+        path: missing.clone(),
+    });
+    cx.run_until_parked();
+    cx.read(|cx| {
+        assert_eq!(view.read(cx).document.path(), Some(first.as_path()));
+        assert_eq!(view.read(cx).editor.read(cx).text(), "first");
+        assert_eq!(cx.windows().len(), 2);
+        assert!(!cx.global::<Session>().recent.paths.contains(&missing));
+        assert!(view.read(cx).error);
+    });
+}
+
 pub(super) fn note(directory: &Path, name: &str, text: &str) -> PathBuf {
     let path = directory.join(name);
     std::fs::write(&path, text).unwrap();
@@ -159,9 +269,11 @@ fn opening_a_recent_note_creates_a_window(cx: &mut TestAppContext) {
     let first = note(directory.path(), "first.md", "First note");
     let second = note(directory.path(), "second.md", "Second note");
     let (view, cx) = cx.add_window_view(|window, cx| TinyMd::new(Some(first.clone()), window, cx));
-    cx.update(|window, cx| {
+    cx.update(|_, cx| {
         remember(&second, cx);
-        view.update(cx, |this, cx| this.recent(0, window, cx));
+    });
+    cx.dispatch_action(OpenRecentFile {
+        path: second.clone(),
     });
     cx.run_until_parked();
     cx.read(|cx| {
@@ -487,7 +599,7 @@ fn opening_a_note_reuses_a_pristine_untitled_window(cx: &mut TestAppContext) {
                 .focus_handle()
                 .is_focused(window)
         );
-        assert_eq!(cx.global::<Session>().recent.first(), Some(&path));
+        assert_eq!(cx.global::<Session>().recent.paths.first(), Some(&path));
     });
 }
 

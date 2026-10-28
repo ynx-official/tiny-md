@@ -11,6 +11,7 @@
 | [应用图标](02-design/application-icons.md) | Windows 留白与 DPI 尺寸、macOS 独立素材、导出及资源核对 |
 | [外部文件同步](02-design/external-file-sync.md) | 自动同步、三方合并、冲突处理与撤销保护 |
 | [文档窗口](02-design/document-windows.md) | 侧栏定位当前文档、默认目录折叠、当前窗口切换、空白未命名窗口复用与草稿保护 |
+| [最近文件记录](02-design/recent-files.md) | 本地持久化、20 条去重排序、路径展示、清除及文件操作同步 |
 | [在线更新设计](03-architecture/online-updates.md) | 已确认的三级更新源、下载校验、安装重启与发布边界 |
 | [ELK 流程图布局](03-architecture/flowchart-elk-layout.md) | 原生 ELK 适配、分组与坐标、字体、回退及资源保护 |
 | [流程图阅读顺序](04-quality/flowchart-reading-order.md) | 多循环图主线顺序、外围回退线、分支引号与 Typora 截图对照 |
@@ -41,6 +42,7 @@
 | [v0.2.11 版本详情](06-delivery/versions/v0.2.11.md) | 大纲章节定位与侧栏当前文档定位 |
 | [v0.2.13 版本详情](06-delivery/versions/v0.2.13.md) | Markdown 本地与远程图片内嵌预览 |
 | [v0.2.14 版本详情](06-delivery/versions/v0.2.14.md) | Markdown HTML 混排、可见功能标记及 SVG 字体内存优化 |
+| [v0.2.15 版本详情](06-delivery/versions/v0.2.15.md) | Markdown 表格编辑工具、夜间模式与持久化最近文件 |
 | [v0.2.12 未发布记录](99-archive/v0.2.12-failed-release.md) | Clippy 检查失败与补丁版本替代 |
 | [v0.2.8 未发布记录](99-archive/v0.2.8-failed-release.md) | CI Clippy 失败、未公开 Release 与替代版本 |
 | [v0.2.7 版本详情](06-delivery/versions/v0.2.7.md) | 双平台段落空行修复与本次跳过测试的发布记录 |

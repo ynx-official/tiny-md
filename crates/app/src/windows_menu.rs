@@ -4,6 +4,7 @@ use gpui_component::{
     Selectable, Sizable,
     button::{Button, ButtonVariants},
     menu::PopupMenu,
+    tooltip::Tooltip,
 };
 
 pub(crate) struct WindowsMenuBar {
@@ -96,10 +97,35 @@ fn fill_popup(
         popup = popup.action_context(focus);
     }
     let scrollable = items.len() > 20;
-    for item in items {
+    let is_recent = items.iter().any(|item| matches!(item,
+        OwnedMenuItem::Action { action, .. } if action.as_any().is::<crate::menus::ClearRecentFiles>()));
+    let recent_width = (f32::from(window.viewport_size().width) - 260.0).clamp(240.0, 600.0);
+    if is_recent {
+        popup = popup.min_w(px(recent_width)).max_w(px(recent_width));
+    }
+    for (index, item) in items.into_iter().enumerate() {
         popup = match item {
             OwnedMenuItem::Action { name, action, .. } => {
-                if let Some(label) = name.strip_prefix("✓ ") {
+                if gpui::is_no_action(action.as_ref()) {
+                    popup.menu_with_disabled(name, action, true)
+                } else if let Some(recent) = action
+                    .as_any()
+                    .downcast_ref::<crate::menus::OpenRecentFile>()
+                {
+                    let path = recent.path.clone();
+                    let full = crate::recent_files::display_path(&path);
+                    popup.menu_element(action, move |window, _| {
+                        let label = recent_label(&path, px(recent_width - 32.0), window);
+                        let full = full.clone();
+                        div()
+                            .id(("recent-file", index))
+                            .w_full()
+                            .min_w_0()
+                            .truncate()
+                            .child(label)
+                            .tooltip(move |window, cx| Tooltip::new(full.clone()).build(window, cx))
+                    })
+                } else if let Some(label) = name.strip_prefix("✓ ") {
                     popup.menu_with_check(label.to_owned(), true, action)
                 } else {
                     popup.menu(name, action)
@@ -115,7 +141,30 @@ fn fill_popup(
             OwnedMenuItem::SystemMenu(_) => popup,
         };
     }
-    popup.scrollable(scrollable)
+    popup.scrollable(scrollable || is_recent)
+}
+
+fn recent_label(path: &std::path::Path, available: Pixels, window: &Window) -> String {
+    let style = window.text_style();
+    let mut limit = crate::recent_files::display_path(path).chars().count();
+    loop {
+        let label = crate::recent_files::menu_label(path, limit);
+        let width = window
+            .text_system()
+            .shape_line(
+                label.clone().into(),
+                style.font_size.to_pixels(window.rem_size()),
+                &[style.to_run(label.len())],
+                None,
+            )
+            .width;
+        if width <= available || limit <= 8 {
+            return label;
+        }
+        limit = ((limit as f32 * f32::from(available) / f32::from(width)) as usize)
+            .min(limit - 1)
+            .max(8);
+    }
 }
 
 impl Render for WindowsMenuBar {
@@ -179,5 +228,55 @@ impl Render for WindowsMenuBar {
             });
         }
         bar
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use core::prelude::v1::test;
+
+    #[gpui::test]
+    fn recent_paths_use_available_width_and_keep_long_unicode_paths_on_one_line(
+        cx: &mut TestAppContext,
+    ) {
+        crate::file_open_tests::init(cx);
+        let (_, cx) = cx.add_window_view(|window, cx| crate::TinyMd::new(None, window, cx));
+        cx.update(|window, _| {
+            let path = std::path::Path::new(
+                r"D:\study\tiny-md\target\recent-files-native\notes\history-check.md",
+            );
+            // TestPlatform uses synthetic glyph widths; size the fitting case
+            // using those metrics instead of assuming Windows font measurements.
+            let style = window.text_style();
+            let full = path.to_string_lossy().into_owned();
+            let natural_width = window
+                .text_system()
+                .shape_line(
+                    full.clone().into(),
+                    style.font_size.to_pixels(window.rem_size()),
+                    &[style.to_run(full.len())],
+                    None,
+                )
+                .width;
+            assert_eq!(recent_label(path, natural_width + px(1.0), window), full);
+            let long = format!("D:\\{}\\文档🌱.md", "很长目录\\".repeat(15));
+            let label = recent_label(std::path::Path::new(&long), px(208.0), window);
+            assert!(label.contains('…'));
+            assert!(label.ends_with("文档🌱.md"));
+            let style = window.text_style();
+            assert!(
+                window
+                    .text_system()
+                    .shape_line(
+                        label.clone().into(),
+                        style.font_size.to_pixels(window.rem_size()),
+                        &[style.to_run(label.len())],
+                        None
+                    )
+                    .width
+                    <= px(208.0)
+            );
+        });
     }
 }

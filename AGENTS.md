@@ -4,6 +4,7 @@
 
 - 沿用 Rust workspace、GPUI 0.2.2、GPUI Component 0.5.0、Guise 1.9.1，不更换技术栈。
 - `crates/app` 管理窗口、菜单和文件交互；`crates/editor-adapter` 管理编辑与平台输入；`crates/document` 管理磁盘状态。
+- 用户于 2026-10-28 要求“文件 → 打开最近文件”持久化到本地，并参考 Typora 路径列表样式；实现默认保留最近 20 个文件，支持去重、清除及文件操作同步，Windows / macOS 共用规则。详见 `docs/02-design/recent-files.md`。
 - Windows 适配以 Windows 10/11 x64 + MSVC 为目标，保留现有 macOS 行为和简洁写作布局。
 - 新平台特有代码应限制在明确的平台边界内；公共行为应有回归测试。
 - 用户于 2026-10-28 确认先实现 Markdown 表格的上下文工具栏与更多菜单，包含列对齐、增删和移动行列、复制、格式化与删除整表；Windows / macOS 共用实现，网格尺寸面板后续再做，HTML 表格继续源码编辑。交互与验证见 `docs/04-quality/markdown-table-controls.md`。

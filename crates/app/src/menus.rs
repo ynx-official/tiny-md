@@ -19,11 +19,7 @@ actions!(
         Hide,
         HideOthers,
         ShowAll,
-        Recent1,
-        Recent2,
-        Recent3,
-        Recent4,
-        Recent5,
+        ClearRecentFiles,
         ToggleSource,
         ToggleTheme,
         LightTheme,
@@ -108,6 +104,14 @@ actions!(
     ]
 );
 
+// A menu can remain open while another window changes the MRU order. Carry the
+// path in the action so selecting a visible entry always opens that document.
+#[derive(Clone, Debug, PartialEq, Action)]
+#[action(namespace = tiny_md, no_json)]
+pub struct OpenRecentFile {
+    pub path: std::path::PathBuf,
+}
+
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 pub struct MenuState {
     pub source: bool,
@@ -145,22 +149,21 @@ pub(crate) fn reveal_label() -> &'static str {
 }
 
 fn build(state: MenuState, recent: &[std::path::PathBuf], mac: bool) -> Vec<Menu> {
-    let recent_actions: Vec<Box<dyn Action>> = vec![
-        Box::new(Recent1),
-        Box::new(Recent2),
-        Box::new(Recent3),
-        Box::new(Recent4),
-        Box::new(Recent5),
-    ];
-    let recent_items = recent
+    let mut recent_items = recent
         .iter()
-        .zip(recent_actions)
-        .map(|(path, action)| MenuItem::Action {
-            name: path.to_string_lossy().into_owned().into(),
-            action,
-            os_action: None,
+        .take(crate::recent_files::LIMIT)
+        .map(|path| {
+            MenuItem::action(
+                crate::recent_files::menu_label(path, 72),
+                OpenRecentFile { path: path.clone() },
+            )
         })
-        .collect();
+        .collect::<Vec<_>>();
+    if recent_items.is_empty() {
+        recent_items.push(MenuItem::action("暂无最近文件", gpui::NoAction));
+    }
+    recent_items.push(MenuItem::separator());
+    recent_items.push(MenuItem::action("清除最近文件", ClearRecentFiles));
     let mut menus = vec![
         Menu {
             name: "Tiny MD".into(),
@@ -494,11 +497,6 @@ pub fn register_forwarding(cx: &mut App) {
         RevealDocument,
         CloseDocument,
         About,
-        Recent1,
-        Recent2,
-        Recent3,
-        Recent4,
-        Recent5,
         ToggleSource,
         ToggleTheme,
         LightTheme,
@@ -586,6 +584,49 @@ pub fn register_forwarding(cx: &mut App) {
 mod tests {
     use super::*;
     use core::prelude::v1::test;
+
+    #[test]
+    fn recent_menu_shows_empty_state_and_clear_entry_on_both_platforms() {
+        for mac in [false, true] {
+            let menus = build(MenuState::default(), &[], mac);
+            let recent = menus
+                .iter()
+                .flat_map(|menu| &menu.items)
+                .find_map(|item| match item {
+                    MenuItem::Submenu(menu) if menu.name == "打开最近文件" => Some(menu),
+                    _ => None,
+                })
+                .unwrap();
+            let labels = recent
+                .items
+                .iter()
+                .filter_map(|item| match item {
+                    MenuItem::Action { name, .. } => Some(name.as_ref()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(labels, ["暂无最近文件", "清除最近文件"]);
+        }
+    }
+
+    #[test]
+    fn recent_menu_contains_all_twenty_paths() {
+        let paths = (0..20)
+            .map(|index| std::path::PathBuf::from(format!("/notes/{index}.md")))
+            .collect::<Vec<_>>();
+        for mac in [false, true] {
+            let menus = build(MenuState::default(), &paths, mac);
+            let recent = menus
+                .iter()
+                .flat_map(|menu| &menu.items)
+                .find_map(|item| match item {
+                    MenuItem::Submenu(menu) if menu.name == "打开最近文件" => Some(menu),
+                    _ => None,
+                })
+                .unwrap();
+            assert_eq!(recent.items.len(), 22, "twenty files, separator, clear");
+        }
+    }
 
     #[test]
     fn night_mode_menu_checks_the_saved_mode_on_both_platforms() {

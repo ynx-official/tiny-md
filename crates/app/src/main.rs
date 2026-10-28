@@ -31,6 +31,7 @@ mod menus;
 mod outline_navigation_tests;
 mod panels;
 mod preferences;
+mod recent_files;
 #[cfg(test)]
 mod sidebar_navigation_tests;
 mod sidebar_resize;
@@ -66,7 +67,7 @@ enum Intent {
 #[derive(Default)]
 struct Session {
     windows: Vec<(AnyWindowHandle, WeakEntity<TinyMd>)>,
-    recent: Vec<PathBuf>,
+    recent: recent_files::RecentFiles,
     quitting: bool,
     updating: bool,
     update_launching: bool,
@@ -79,10 +80,8 @@ struct Session {
 impl Global for Session {}
 
 fn remember(path: &Path, cx: &mut App) {
-    let session = cx.global_mut::<Session>();
-    session.recent.retain(|old| old != path);
-    session.recent.insert(0, path.to_owned());
-    session.recent.truncate(5);
+    cx.global_mut::<Session>().recent.remember(path);
+    cx.refresh_windows();
 }
 
 fn apply_theme(dark: bool, window: &mut Window, cx: &mut App) {
@@ -1086,10 +1085,11 @@ impl TinyMd {
         cx.notify();
     }
 
-    fn recent(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(path) = cx.global::<Session>().recent.get(index).cloned() {
-            self.request(Intent::OpenPath(path), window, cx);
+    fn clear_recent(&mut self, cx: &mut Context<Self>) {
+        if let Err(error) = cx.global_mut::<Session>().recent.clear() {
+            self.fail(format!("清除最近文件失败：{error:#}"), cx);
         }
+        cx.refresh_windows();
     }
 
     fn stats(&self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1153,7 +1153,7 @@ impl Render for TinyMd {
             || (cx.active_window().is_none()
                 && cx.global::<Session>().current == Some(window.window_handle().window_id()))
         {
-            let recent = cx.global::<Session>().recent.clone();
+            let recent = cx.global::<Session>().recent.paths.clone();
             let stamp = (
                 window.window_handle().window_id(),
                 menu_state,
@@ -1166,7 +1166,7 @@ impl Render for TinyMd {
         }
         #[cfg(target_os = "windows")]
         let menu_bar = {
-            let recent = cx.global::<Session>().recent.clone();
+            let recent = cx.global::<Session>().recent.paths.clone();
             if self
                 .menu_bar
                 .as_ref()
@@ -1460,7 +1460,21 @@ impl Render for TinyMd {
                         self.status.clone()
                     } else {
                         String::new()
-                    }),
+                    })
+                    .when_some(
+                        cx.global::<Session>().recent.error.clone(),
+                        |footer, error| {
+                            footer.child(
+                                Button::new("recent-history-error")
+                                    .ghost()
+                                    .small()
+                                    .label("最近文件记录异常")
+                                    .tooltip(error)
+                                    .text_color(rgb(0xc45b51))
+                                    .h(px(22.0)),
+                            )
+                        },
+                    ),
             )
             .child(
                 div()
@@ -1645,8 +1659,11 @@ impl Render for TinyMd {
             TableAlignCenter => EditorCommand::TableEdit(TableCommand::Align(TableAlignment::Center)),
             TableAlignRight => EditorCommand::TableEdit(TableCommand::Align(TableAlignment::Right)),
         ];
-        macro_rules! recent { ($($action:ty => $index:expr),*) => { $(root = root.on_action(cx.listener(|this, _: &$action, w, cx| this.recent($index, w, cx)));)* }; }
-        recent![Recent1 => 0, Recent2 => 1, Recent3 => 2, Recent4 => 3, Recent5 => 4];
+        root = root
+            .on_action(cx.listener(|this, action: &OpenRecentFile, window, cx| {
+                this.request(Intent::OpenPath(action.path.clone()), window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ClearRecentFiles, _, cx| this.clear_recent(cx)));
         #[cfg(target_os = "windows")]
         {
             macro_rules! menu_actions { ($($action:ty => $index:expr),* $(,)?) => {
@@ -1808,6 +1825,7 @@ fn main() {
             guise_theme(dark).init(cx);
             cx.set_global(Session {
                 dark,
+                recent: recent_files::RecentFiles::load(),
                 ..Default::default()
             });
             menus::bind(cx);
@@ -1819,7 +1837,7 @@ fn main() {
                         == preferences::ThemePreference::System,
                     ..Default::default()
                 },
-                &[],
+                &cx.global::<Session>().recent.paths,
             );
             cx.on_action(|_: &QuitApplication, cx| quit(cx));
             cx.on_action(|action: &NewDocument, cx| {
@@ -1846,6 +1864,27 @@ fn main() {
             cx.on_action(|_: &HideOthers, cx| cx.hide_other_apps());
             cx.on_action(|_: &ShowAll, cx| cx.unhide_other_apps());
             menus::register_forwarding(cx);
+            cx.on_action(|action: &OpenRecentFile, cx| {
+                if !forward_action(action, cx) {
+                    open_editor_window(Some(action.path.clone()), false, cx);
+                }
+            });
+            cx.on_action(|action: &ClearRecentFiles, cx| {
+                if !forward_action(action, cx) {
+                    let _ = cx.global_mut::<Session>().recent.clear();
+                    let session = cx.global::<Session>();
+                    menus::install(
+                        cx,
+                        MenuState {
+                            dark: session.dark,
+                            system_theme: preferences::theme_preference(cx)
+                                == preferences::ThemePreference::System,
+                            ..Default::default()
+                        },
+                        &session.recent.paths,
+                    );
+                }
+            });
             cx.on_action(|_: &CheckUpdates, cx| updates::show(cx, true, false));
             cx.on_action(|_: &ReleaseNotes, cx| updates::show(cx, false, true));
             cx.on_action(|_: &OpenPreferences, cx| {

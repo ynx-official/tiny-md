@@ -1879,7 +1879,9 @@ impl MarkdownEditor {
         let quote_text = style.quote_text.unwrap_or(dimmed);
         let radius = t.radius(t.default_radius);
         let token_colors: [Hsla; 8] = TokenKind::ALL.map(|kind| token_color(kind, t));
-        let table_stripe_bg = t.surface_hover().alpha(if is_dark { 0.55 } else { 0.65 });
+        // Use opaque row fills: translucent hover colors wash out the stripes.
+        // The light fill matches the user's table reference, including its header.
+        let table_stripe_bg: Hsla = gpui::rgb(if is_dark { 0x2c3035 } else { 0xf8f8f8 }).into();
         let table_edit_bg = t.primary().alpha(0.06);
 
         let prose = window.text_style().font();
@@ -2955,7 +2957,7 @@ impl MarkdownEditor {
                     .border_b_1()
                     .border_color(rule_color);
                 if i == table.start {
-                    grid = grid.border_t_1().bg(code_bg);
+                    grid = grid.border_t_1().bg(table_stripe_bg);
                 } else if (i - table.start) % 2 == 1 {
                     grid = grid.bg(table_stripe_bg);
                 }
