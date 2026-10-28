@@ -194,10 +194,12 @@ fn functional_html_marks_have_one_clickable_row_and_keep_ime_undo(cx: &mut TestA
 #[gpui::test]
 fn functional_html_marks_keep_neutrino_sample_layout(cx: &mut TestAppContext) {
     cx.update(|cx| guise::Theme::light().init(cx));
-    let source = include_str!("../../../fixtures/html-functional-markers.md");
+    // Git may check this fixture out with CRLF on Windows. The editor normalizes
+    // line endings, so compare and render against the canonical LF source.
+    let source = include_str!("../../../fixtures/html-functional-markers.md").replace("\r\n", "\n");
     let (editor, cx) = cx.add_window_view(|_, cx| {
-        let mut editor = MarkdownEditor::new(cx).value(source).read_only(true);
-        let doc = crate::html::Document::parse(source, crate::html::parse_root(source).as_ref());
+        let mut editor = MarkdownEditor::new(cx).value(&source).read_only(true);
+        let doc = crate::html::Document::parse(&source, crate::html::parse_root(&source).as_ref());
         // Decode/load behavior has separate tests; fixed image sizes keep this layout
         // regression deterministic while retaining every original URL and source byte.
         for image in doc.image_tags() {

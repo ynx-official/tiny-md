@@ -12,7 +12,9 @@ pub fn decode_hex(text: &str) -> Result<Vec<u8>> {
         "签名编码无效"
     );
     text.as_bytes()
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| u8::from_str_radix(std::str::from_utf8(pair)?, 16).map_err(Into::into))
         .collect()
 }
