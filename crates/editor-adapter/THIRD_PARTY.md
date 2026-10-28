@@ -17,6 +17,11 @@ Guise highlighting remains the fallback for source Markdown and missing grammars
 When upgrading Guise, compare these files against the published sources and
 run the input regressions before bumping the exact dependency version.
 
+`src/editor_tables.rs` adapts the deferred popup positioning and focus-return
+pattern from Guise's `src/overlay/contextmenu.rs` under the same retained MIT
+license. It adds table-specific disabled states, keyboard navigation, scrolling,
+and source-target validation. No dependency source is modified.
+
 # ELK layout dependency
 
 Flowchart layout uses the pinned `elkrs` **0.1.1** dependency, a native Rust

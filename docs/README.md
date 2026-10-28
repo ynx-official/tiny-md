@@ -1,7 +1,7 @@
 # 文档索引
 
 - 状态：Review
-- 最后更新：2026-10-27
+- 最后更新：2026-10-28
 - 关联文档：[项目说明](../README.md)
 
 | 文档 | 内容 |
@@ -22,6 +22,7 @@
 | [验证记录](verification.md) | 自动检查、原生交互和输入法验收证据 |
 | [输入光标同步](04-quality/input-caret-synchronization.md) | 快速输入、换行与自动滚动的光标坐标修复及组合输入回归 |
 | [Markdown 交互](04-quality/markdown-interactions.md) | 复选框原位勾选、链接手形光标、表格与换行链接、只读与源码模式边界 |
+| [Markdown 表格快捷操作](04-quality/markdown-table-controls.md) | 表格工具栏、行列定位、更多菜单、键盘导航、源码与撤销保护及双平台验证边界 |
 | [图片内嵌预览](04-quality/inline-images.md) | 本地相对路径与 HTTP/HTTPS、后台加载、编辑 / 源码切换、资源回收与跨平台验证边界 |
 | [SVG 字体内存优化](04-quality/svg-font-memory.md) | 按需字体读取、紧凑的流程图字体缓存、像素一致性及原生进程内存对照 |
 | [HTML 混排兼容](04-quality/html-compatibility.md) | HTML 标题、换行与注释标记、徽章横排与链接、折叠与 HTML 表格、源码保存及中文输入 / 撤销回归 |

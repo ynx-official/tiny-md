@@ -11,7 +11,7 @@ pub enum Navigation {
     NextRow,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum TableCommand {
     RowAbove,
     RowBelow,
@@ -19,7 +19,39 @@ pub enum TableCommand {
     ColumnRight,
     DeleteRow,
     DeleteColumn,
+    MoveRowUp,
+    MoveRowDown,
+    MoveColumnLeft,
+    MoveColumnRight,
+    DeleteTable,
+    Format,
     Align(Alignment),
+}
+
+/// A logical cell, independent of focus moving into a popup.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct TableContext {
+    pub start: usize,
+    pub end: usize,
+    pub row: usize,
+    pub column: usize,
+    pub rows: usize,
+    pub columns: usize,
+    pub alignment: Alignment,
+}
+
+impl TableContext {
+    pub fn allows(self, command: TableCommand) -> bool {
+        match command {
+            TableCommand::RowAbove | TableCommand::DeleteRow => self.row > 0,
+            TableCommand::MoveRowUp => self.row > 1,
+            TableCommand::MoveRowDown => self.row > 0 && self.row + 1 < self.rows,
+            TableCommand::MoveColumnLeft => self.column > 0,
+            TableCommand::MoveColumnRight => self.column + 1 < self.columns,
+            TableCommand::DeleteColumn => self.columns > 1,
+            _ => true,
+        }
+    }
 }
 
 /// Structural edits replace only this table in one history step.
@@ -30,17 +62,26 @@ pub fn edit(model: &mut EditorModel, command: TableCommand) -> bool {
         return false;
     };
     let table = &tables[index];
-    if cursor.line == table.start + 1 {
+    let Some(context) = table.context(model) else {
+        return false;
+    };
+    if !context.allows(command) {
         return false;
     }
+    let end = model.line(table.end).unwrap_or("").chars().count();
+    if command == TableCommand::DeleteTable {
+        model.move_to(table.start, 0, false);
+        model.move_to(table.end, end, true);
+        return model.delete_selection();
+    }
     let byte = byte_for_col(model.line(cursor.line).unwrap_or(""), cursor.col);
-    let column = table.rows[cursor.line - table.start]
-        .iter()
-        .position(|range| byte <= range.end)
-        .unwrap_or_else(|| {
-            table.rows[cursor.line - table.start]
-                .len()
-                .saturating_sub(1)
+    let column = context.column;
+    let mut cell_offset = table.rows[cursor.line - table.start]
+        .get(column)
+        .map_or(0, |range| {
+            model.lines()[cursor.line][range.start..byte.clamp(range.start, range.end)]
+                .chars()
+                .count()
         });
     let mut alignments = table.alignments.clone();
     let mut rows = table
@@ -48,9 +89,11 @@ pub fn edit(model: &mut EditorModel, command: TableCommand) -> bool {
         .iter()
         .enumerate()
         .filter(|(i, _)| *i != 1)
-        .map(|(i, cells)| {
+        .map(|(i, _)| {
             let source = &model.lines()[table.start + i];
-            (0..alignments.len())
+            // Layout truncates overflow cells. Editing must retain their source.
+            let cells = cells(source);
+            (0..alignments.len().max(cells.len()))
                 .map(|column| {
                     cells
                         .get(column)
@@ -60,11 +103,7 @@ pub fn edit(model: &mut EditorModel, command: TableCommand) -> bool {
                 .collect::<Vec<_>>()
         })
         .collect::<Vec<_>>();
-    let mut row = if cursor.line == table.start {
-        0
-    } else {
-        cursor.line - table.start - 1
-    };
+    let mut row = context.row;
     let mut col = column;
     match command {
         TableCommand::RowAbove | TableCommand::RowBelow => {
@@ -75,6 +114,7 @@ pub fn edit(model: &mut EditorModel, command: TableCommand) -> bool {
             };
             rows.insert(at, vec![String::new(); alignments.len()]);
             row = at;
+            cell_offset = 0;
         }
         TableCommand::ColumnLeft | TableCommand::ColumnRight => {
             let at = column + usize::from(matches!(command, TableCommand::ColumnRight));
@@ -83,6 +123,7 @@ pub fn edit(model: &mut EditorModel, command: TableCommand) -> bool {
                 cells.insert(at, String::new());
             }
             col = at;
+            cell_offset = 0;
         }
         TableCommand::DeleteRow => {
             if row == 0 {
@@ -102,6 +143,29 @@ pub fn edit(model: &mut EditorModel, command: TableCommand) -> bool {
             col = column.min(alignments.len() - 1);
         }
         TableCommand::Align(alignment) => alignments[column] = alignment,
+        TableCommand::MoveRowUp | TableCommand::MoveRowDown => {
+            let target = if command == TableCommand::MoveRowUp {
+                row - 1
+            } else {
+                row + 1
+            };
+            rows.swap(row, target);
+            row = target;
+        }
+        TableCommand::MoveColumnLeft | TableCommand::MoveColumnRight => {
+            let target = if command == TableCommand::MoveColumnLeft {
+                column - 1
+            } else {
+                column + 1
+            };
+            alignments.swap(column, target);
+            for cells in &mut rows {
+                cells.swap(column, target);
+            }
+            col = target;
+        }
+        TableCommand::Format => {}
+        TableCommand::DeleteTable => unreachable!(),
     }
     let delimiter = alignments
         .iter()
@@ -112,17 +176,70 @@ pub fn edit(model: &mut EditorModel, command: TableCommand) -> bool {
         })
         .collect::<Vec<_>>();
     rows.insert(1, delimiter);
-    let source = rows
-        .iter()
-        .map(|cells| format!("| {} |", cells.join(" | ")))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let end = model.line(table.end).unwrap_or("").chars().count();
+    let source = serialize(&rows, command == TableCommand::Format);
+    if source == model.lines()[table.start..=table.end].join("\n") {
+        return false;
+    }
     model.move_to(table.start, 0, false);
     model.move_to(table.end, end, true);
     model.insert(&source);
     focus_cell(model, table.start + row + usize::from(row > 0), col);
+    let pos = model.cursor();
+    let value = &rows[row + usize::from(row > 0)][col];
+    model.move_to(
+        pos.line,
+        pos.col + cell_offset.min(value.chars().count()),
+        false,
+    );
     true
+}
+
+fn serialize(rows: &[Vec<String>], padded: bool) -> String {
+    let width = |value: &str| {
+        value
+            .chars()
+            .map(|c| if c.is_ascii() { 1 } else { 2 })
+            .sum::<usize>()
+    };
+    let columns = rows.iter().map(Vec::len).max().unwrap_or(0);
+    let widths = (0..columns)
+        .map(|col| {
+            rows.iter()
+                .filter_map(|row| row.get(col))
+                .map(|s| width(s))
+                .max()
+                .unwrap_or(3)
+                .max(3)
+        })
+        .collect::<Vec<_>>();
+    rows.iter()
+        .enumerate()
+        .map(|(index, row)| {
+            let cells = row
+                .iter()
+                .enumerate()
+                .map(|(col, value)| {
+                    if !padded {
+                        return value.clone();
+                    }
+                    if index == 1 {
+                        let left = value.starts_with(':');
+                        let right = value.ends_with(':');
+                        format!(
+                            "{}{}{}",
+                            if left { ":" } else { "" },
+                            "-".repeat(widths[col] - usize::from(left) - usize::from(right)),
+                            if right { ":" } else { "" }
+                        )
+                    } else {
+                        format!("{value}{}", " ".repeat(widths[col] - width(value)))
+                    }
+                })
+                .collect::<Vec<_>>();
+            format!("| {} |", cells.join(" | "))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn closing_pipe(source: &str) -> bool {
@@ -424,6 +541,36 @@ pub fn collect(lines: &[String]) -> (Vec<Table>, Vec<Option<usize>>) {
 }
 
 impl Table {
+    pub(crate) fn context(&self, model: &EditorModel) -> Option<TableContext> {
+        let cursor = model.cursor();
+        if cursor.line < self.start || cursor.line > self.end || cursor.line == self.start + 1 {
+            return None;
+        }
+        // Text selection is not a rectangular cell selection. Its active end
+        // identifies the row/column, but no action may consume adjacent prose.
+        if model
+            .selection()
+            .is_some_and(|(start, end)| start.line < self.start || end.line > self.end)
+        {
+            return None;
+        }
+        let byte = byte_for_col(model.line(cursor.line).unwrap_or(""), cursor.col);
+        let ranges = &self.rows[cursor.line - self.start];
+        let column = ranges
+            .iter()
+            .position(|r| byte <= r.end)
+            .unwrap_or(ranges.len().saturating_sub(1));
+        Some(TableContext {
+            start: self.start,
+            end: self.end,
+            row: cursor.line - self.start - usize::from(cursor.line > self.start),
+            column,
+            rows: self.rows.len() - 1,
+            columns: self.alignments.len(),
+            alignment: self.alignments[column],
+        })
+    }
+
     /// Short labels stay compact; verbose columns receive more writing space.
     pub fn widths(&self, lines: &[String], available: f32) -> Vec<f32> {
         let weights = (0..self.alignments.len())
@@ -456,6 +603,136 @@ impl Table {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn table_moves_follow_content_and_keep_alignment_and_single_step_history() {
+        use super::*;
+        let source = "前文\n\n| 姓名 | 值 |\n| --- | ---: |\n| 甲 | `a\\|b` |\n| 乙🌱 | [链接](https://example.com) |\n\n后文";
+        for (line, column, command, target_line, target_column) in [
+            (4, 1, TableCommand::MoveRowDown, 5, 1),
+            (5, 1, TableCommand::MoveRowUp, 4, 1),
+            (5, 1, TableCommand::MoveColumnLeft, 5, 0),
+            (5, 0, TableCommand::MoveColumnRight, 5, 1),
+        ] {
+            let mut model = EditorModel::new(source);
+            focus_cell(&mut model, line, column);
+            let before = model.line(line).unwrap()
+                [cells(model.line(line).unwrap())[column].clone()]
+            .to_owned();
+            assert!(edit(&mut model, command));
+            let pos = model.cursor();
+            assert_eq!(pos.line, target_line);
+            let ranges = cells(model.line(pos.line).unwrap());
+            assert_eq!(
+                &model.line(pos.line).unwrap()[ranges[target_column].clone()],
+                before
+            );
+            if matches!(
+                command,
+                TableCommand::MoveColumnLeft | TableCommand::MoveColumnRight
+            ) {
+                assert_eq!(
+                    collect(model.lines()).0[0].alignments,
+                    [Alignment::Right, Alignment::Left]
+                );
+            }
+            assert!(model.text().starts_with("前文\n\n"));
+            assert!(model.text().ends_with("\n\n后文"));
+            let changed = model.text();
+            assert!(model.undo());
+            assert_eq!(model.text(), source);
+            assert!(model.redo());
+            assert_eq!(model.text(), changed);
+        }
+    }
+
+    #[test]
+    fn table_boundary_actions_are_noops_without_history() {
+        use super::*;
+        let source = "| 标题 |\n| --- |\n| 内容 |";
+        for (line, command) in [
+            (0, TableCommand::RowAbove),
+            (0, TableCommand::DeleteRow),
+            (0, TableCommand::MoveRowDown),
+            (0, TableCommand::MoveRowUp),
+            (2, TableCommand::MoveRowDown),
+            (2, TableCommand::MoveRowUp),
+            (2, TableCommand::DeleteColumn),
+            (2, TableCommand::MoveColumnLeft),
+            (2, TableCommand::MoveColumnRight),
+        ] {
+            let mut model = EditorModel::new(source);
+            model.move_to(line, 3, false);
+            let cursor = model.cursor();
+            assert!(!edit(&mut model, command), "{command:?}");
+            assert_eq!(model.text(), source);
+            assert_eq!(model.cursor(), cursor);
+            assert!(!model.undo());
+        }
+    }
+
+    #[test]
+    fn table_format_is_explicit_idempotent_and_preserves_all_cell_text() {
+        use super::*;
+        let source =
+            "前文\n\n名称|内容\n:---|---:\n中文🌱|`a\\|b`\n短行|\n尾行|**粗体**|多余内容\n\n后文";
+        let mut model = EditorModel::new(source);
+        focus_cell(&mut model, 4, 1);
+        assert!(edit(&mut model, TableCommand::Format));
+        for text in ["中文🌱", "`a\\|b`", "**粗体**", "多余内容"] {
+            assert!(model.text().contains(text));
+        }
+        let formatted = model.text();
+        assert!(!edit(&mut model, TableCommand::Format));
+        assert_eq!(model.text(), formatted);
+        assert!(model.undo());
+        assert_eq!(model.text(), source);
+    }
+
+    #[test]
+    fn table_delete_only_removes_current_table_and_is_undoable_at_document_edges() {
+        use super::*;
+        let table = "| 标题 |\n| --- |\n| 中文🌱 |";
+        for (prefix, suffix) in [
+            ("", ""),
+            ("前文\n\n", ""),
+            ("", "\n\n后文"),
+            ("前文\n\n", "\n\n后文"),
+        ] {
+            let source = format!("{prefix}{table}{suffix}");
+            let mut model = EditorModel::new(&source);
+            model.move_to(prefix.chars().filter(|&c| c == '\n').count() + 2, 3, false);
+            assert!(edit(&mut model, TableCommand::DeleteTable));
+            assert_eq!(model.text(), format!("{prefix}{suffix}"));
+            assert!(model.undo());
+            assert_eq!(model.text(), source);
+        }
+    }
+
+    #[test]
+    fn table_actions_reject_selection_crossing_into_prose() {
+        use super::*;
+        let source = "前文\n\n| A | B |\n| --- | --- |\n| 中文 | 内容 |\n\n后文";
+        let mut model = EditorModel::new(source);
+        model.move_to(0, 0, false);
+        model.move_to(4, 3, true);
+        let selection = model.selection();
+        assert!(!edit(&mut model, TableCommand::DeleteRow));
+        assert_eq!(model.text(), source);
+        assert_eq!(model.selection(), selection);
+    }
+
+    #[test]
+    fn table_actions_preserve_overflow_source_cells() {
+        use super::*;
+        let source = "| A | B |\n| --- | --- |\n| 中文 | `a\\|b` | 隐藏但不能丢失 🌱 |";
+        let mut model = EditorModel::new(source);
+        model.move_to(2, 3, false);
+        assert!(edit(&mut model, TableCommand::ColumnRight));
+        assert!(model.text().contains("隐藏但不能丢失 🌱"));
+        assert!(model.undo());
+        assert_eq!(model.text(), source);
+    }
+
     #[test]
     fn structural_edits_preserve_escaped_unicode_cells_and_undo_as_one_step() {
         use super::*;

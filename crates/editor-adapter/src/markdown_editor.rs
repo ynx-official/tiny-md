@@ -71,7 +71,10 @@ enum ScrollRequest {
     LineStart,
 }
 
-gpui::actions!(tiny_md_editor, [EditorTab, EditorTabPrevious]);
+gpui::actions!(
+    tiny_md_editor,
+    [EditorTab, EditorTabPrevious, EditorTableMenu]
+);
 struct EditorKeyBindings;
 impl gpui::Global for EditorKeyBindings {}
 
@@ -79,6 +82,8 @@ impl gpui::Global for EditorKeyBindings {}
 mod editor_html;
 #[path = "editor_images.rs"]
 mod editor_images;
+#[path = "editor_tables.rs"]
+mod editor_tables;
 #[path = "image_flow.rs"]
 mod image_flow;
 #[cfg(test)]
@@ -91,6 +96,9 @@ mod platform_input;
 #[cfg(test)]
 #[path = "render_regressions.rs"]
 mod render_regressions;
+#[cfg(test)]
+#[path = "table_interaction_tests.rs"]
+mod table_interaction_tests;
 
 /// Emitted as the user edits or activates a link.
 #[derive(Debug, Clone)]
@@ -586,6 +594,8 @@ pub struct MarkdownEditor {
     document_focused: bool,
     /// The right-click Cut / Copy / Paste menu, built on each right-click.
     menu: Option<Entity<ContextMenu>>,
+    table_menu: Option<Entity<editor_tables::TableMenu>>,
+    table_menu_changes: Option<gpui::Subscription>,
     scroll: ScrollHandle,
     /// Window-space bounds of the document content, captured at prepaint.
     text_bounds: Bounds<Pixels>,
@@ -631,7 +641,9 @@ impl MarkdownEditor {
             cx.bind_keys([
                 gpui::KeyBinding::new("tab", EditorTab, Some("TinyMdMarkdown")),
                 gpui::KeyBinding::new("shift-tab", EditorTabPrevious, Some("TinyMdMarkdown")),
+                gpui::KeyBinding::new("shift-f10", EditorTableMenu, Some("TinyMdMarkdown")),
             ]);
+            editor_tables::bind_keys(cx);
             cx.set_global(EditorKeyBindings);
         }
         let executor = cx.background_executor().clone();
@@ -675,6 +687,8 @@ impl MarkdownEditor {
             caret_layer,
             document_focused: false,
             menu: None,
+            table_menu: None,
+            table_menu_changes: None,
             scroll: ScrollHandle::new(),
             text_bounds: Bounds::default(),
             wrap_w: DEFAULT_WRAP,
@@ -912,7 +926,12 @@ impl MarkdownEditor {
                 self.toggle_task(self.model.cursor().line, cx);
             }
             EditorCommand::TableEdit(command) => {
-                self.edit(cx, |model| tables::edit(model, command));
+                if self
+                    .table_context()
+                    .is_some_and(|cell| cell.allows(command))
+                {
+                    self.edit(cx, |model| tables::edit(model, command));
+                }
             }
             command => self.edit(cx, |model| crate::commands::apply(model, command)),
         }
@@ -1288,7 +1307,7 @@ impl MarkdownEditor {
 
     fn on_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         self.caret.reset();
-        if editmenu::is_open(&self.menu, cx) {
+        if editmenu::is_open(&self.menu, cx) || self.table_menu_open(cx) {
             return;
         }
         // The OS owns candidate navigation, Enter and Escape during composition.
@@ -1813,8 +1832,17 @@ impl MarkdownEditor {
 impl MarkdownEditor {
     fn render_document(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         self.work.document_renders += 1;
-        let focused = self.focus.is_focused(window);
-        let caret_focused = focused && window.is_window_active() && !self.read_only;
+        if let Some(menu) = self.table_menu.clone()
+            && menu.read(cx).is_open()
+            && (self.source_mode || self.read_only || !menu.read(cx).valid(&self.model))
+        {
+            menu.update(cx, |menu, cx| menu.close(window, cx));
+        }
+        // A popup owns keyboard focus, but the original cell keeps its editing
+        // layout and selection so opening the menu cannot reflow the document.
+        let editor_focused = self.focus.is_focused(window);
+        let focused = editor_focused || self.table_menu_open(cx);
+        let caret_focused = editor_focused && window.is_window_active() && !self.read_only;
         if caret_focused && !self.caret.focused {
             self.caret.reset();
         }
@@ -1960,11 +1988,31 @@ impl MarkdownEditor {
         } else {
             parsed.tables.as_slice()
         };
+        let markdown_tables: Vec<_> = parsed
+            .tables
+            .iter()
+            .map(|table| !editor_tables::inside_html_table(&parsed.html, table.start, table.end))
+            .collect();
         let table_membership: Vec<_> = parsed
             .table_membership
             .iter()
-            .map(|index| if self.source_mode { None } else { *index })
+            .map(|index| {
+                if self.source_mode {
+                    None
+                } else {
+                    index.filter(|&index| markdown_tables[index])
+                }
+            })
             .collect();
+        let active_table = (focused && !self.read_only)
+            .then(|| {
+                table_membership
+                    .get(cursor.line)
+                    .copied()
+                    .flatten()
+                    .and_then(|index| tables[index].context(&self.model))
+            })
+            .flatten();
         let cell_style = CellStyle {
             base,
             font: prose.clone(),
@@ -2425,6 +2473,7 @@ impl MarkdownEditor {
                 }) | table_index.map_or(0, |index| {
                     (u8::from(i == tables[index].start) << 2)
                         | (u8::from(i == tables[index].start + 1) << 3)
+                        | (u8::from(!self.read_only) << 4)
                 }),
                 preview: code_index.map_or(0, |index| preview_heights[index].to_bits()),
                 image_preview: image_height.to_bits(),
@@ -2751,6 +2800,10 @@ impl MarkdownEditor {
                         .map(|cell| cell.row.height)
                         .fold(0.0, f32::max)
                         + 20.0;
+                    if i == table.start && !self.read_only {
+                        row.pad_top += editor_tables::TOOLBAR_HEIGHT;
+                        row.height += editor_tables::TOOLBAR_HEIGHT;
+                    }
                 }
             }
             row.height += image_height;
@@ -2874,6 +2927,7 @@ impl MarkdownEditor {
             if self.focus_mode
                 && i != cursor.line
                 && !selection.is_some_and(|(start, end)| i >= start.line && i <= end.line)
+                && active_table.is_none_or(|cell| cell.start != i)
             {
                 el = el.opacity(0.35);
             }
@@ -2885,18 +2939,34 @@ impl MarkdownEditor {
 
             if let Some(index) = table_membership[i] {
                 let table = &tables[index];
-                el = el
+                let toolbar_height = if i == table.start && !self.read_only {
+                    editor_tables::TOOLBAR_HEIGHT
+                } else {
+                    0.0
+                };
+                let mut grid = div()
+                    .absolute()
+                    .left_0()
+                    .right_0()
+                    .top(px(toolbar_height))
+                    .bottom_0()
                     .border_l_1()
                     .border_r_1()
                     .border_b_1()
                     .border_color(rule_color);
                 if i == table.start {
-                    el = el.border_t_1().bg(code_bg);
+                    grid = grid.border_t_1().bg(code_bg);
                 } else if (i - table.start) % 2 == 1 {
-                    el = el.bg(table_hover_bg);
+                    grid = grid.bg(table_hover_bg);
                 }
                 if i == cursor.line && focused && !self.read_only {
-                    el = el.bg(table_edit_bg);
+                    grid = grid.bg(table_edit_bg);
+                }
+                el = el.child(grid);
+                if i == table.start
+                    && let Some(cell) = active_table.filter(|cell| cell.start == i)
+                {
+                    el = el.child(self.table_toolbar(cell, cx));
                 }
                 for (column, cell) in row.cells.iter().enumerate() {
                     if column > 0 {
@@ -2904,7 +2974,7 @@ impl MarkdownEditor {
                             div()
                                 .absolute()
                                 .left(px(cell.x))
-                                .top_0()
+                                .top(px(toolbar_height))
                                 .bottom_0()
                                 .w(px(1.0))
                                 .bg(rule_color),
@@ -3497,6 +3567,11 @@ impl MarkdownEditor {
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_down(MouseButton::Right, cx.listener(Self::on_right_mouse_down))
             .children(editmenu::slot(&self.menu))
+            .children(
+                self.table_menu
+                    .clone()
+                    .map(|menu| div().absolute().child(menu)),
+            )
             .on_drag(MarkdownDrag(cx.entity_id()), |_, _, _, cx| {
                 cx.new(|_| Empty)
             })
@@ -3520,6 +3595,17 @@ impl MarkdownEditor {
                     return;
                 }
                 this.on_tab(true, cx);
+            }))
+            .on_action(cx.listener(|this, _: &EditorTableMenu, window, cx| {
+                let position = this.text_bounds.origin
+                    + point(
+                        px(this.wrap_w - PAD_X * 2.0),
+                        px(this
+                            .layout
+                            .get(this.model.cursor().line)
+                            .map_or(0.0, |row| row.y.get())),
+                    );
+                this.open_table_menu(position, window, cx);
             }))
             .overflow_y_scroll()
             .track_scroll(&self.scroll)

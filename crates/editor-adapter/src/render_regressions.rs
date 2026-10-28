@@ -3,6 +3,36 @@ use gpui::TestAppContext;
 use gpui::{EntityInputHandler, ScrollDelta, ScrollWheelEvent, size};
 
 #[gpui::test]
+fn table_toolbar_tracks_cursor_without_changing_document_or_row_positions(cx: &mut TestAppContext) {
+    cx.update(|cx| guise::Theme::light().init(cx));
+    let source = "正文\n\n| 标题 | 内容 |\n| --- | --- |\n| 中文 | 内容 |\n\n后文";
+    let (editor, cx) = cx.add_window_view(|window, cx| {
+        let editor = MarkdownEditor::new(cx).value(source);
+        window.focus(&editor.focus);
+        editor
+    });
+    draw(cx);
+    draw(cx);
+    assert!(cx.debug_bounds("table-toolbar").is_none());
+    let before = cx.read(|app| editor.read(app).layout[6].y.get());
+    editor.update(cx, |editor, cx| {
+        editor.model.move_to(4, 3, false);
+        cx.notify();
+    });
+    draw(cx);
+    draw(cx);
+    assert!(
+        cx.debug_bounds("table-toolbar").is_some(),
+        "the active table needs local actions"
+    );
+    cx.read(|app| {
+        let editor = editor.read(app);
+        assert_eq!(editor.text(), source);
+        assert_eq!(editor.layout[6].y.get(), before);
+    });
+}
+
+#[gpui::test]
 fn functional_html_marks_have_one_clickable_row_and_keep_ime_undo(cx: &mut TestAppContext) {
     cx.update(|cx| guise::Theme::light().init(cx));
     let source = "正文\n<br/>\n<!-- hello 中文🌱 -->\n后文";
