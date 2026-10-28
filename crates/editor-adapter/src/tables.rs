@@ -25,6 +25,7 @@ pub enum TableCommand {
     MoveColumnRight,
     DeleteTable,
     Format,
+    Resize { columns: usize, rows: usize },
     Align(Alignment),
 }
 
@@ -49,9 +50,47 @@ impl TableContext {
             TableCommand::MoveColumnLeft => self.column > 0,
             TableCommand::MoveColumnRight => self.column + 1 < self.columns,
             TableCommand::DeleteColumn => self.columns > 1,
+            TableCommand::Resize { columns, rows } => valid_size(columns, rows),
             _ => true,
         }
     }
+}
+
+pub(crate) const MAX_COLUMNS: usize = 128;
+pub(crate) const MAX_ROWS: usize = 2048;
+const MAX_CELLS: usize = 65_536;
+
+pub(crate) fn valid_size(columns: usize, rows: usize) -> bool {
+    (1..=MAX_COLUMNS).contains(&columns)
+        && (1..=MAX_ROWS).contains(&rows)
+        && columns * rows <= MAX_CELLS
+}
+
+/// Count original nonempty cells removed by a resize, including overflow source
+/// cells that the preview does not draw. The delimiter is never a data row.
+pub(crate) fn resize_loss(model: &EditorModel, columns: usize, rows: usize) -> Option<usize> {
+    if !valid_size(columns, rows) {
+        return None;
+    }
+    let (tables, _) = collect(model.lines());
+    let table = tables.iter().find(|table| table.context(model).is_some())?;
+    let loss = model.lines()[table.start..=table.end]
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| *index != 1)
+        .enumerate()
+        .map(|(row, (_, source))| {
+            cells(source)
+                .iter()
+                .enumerate()
+                .filter(|(column, range)| {
+                    (row >= rows || (columns < table.alignments.len() && *column >= columns))
+                        && !source[(*range).clone()].trim().is_empty()
+                })
+                .count()
+        })
+        .sum();
+    Some(loss)
 }
 
 /// Structural edits replace only this table in one history step.
@@ -66,6 +105,14 @@ pub fn edit(model: &mut EditorModel, command: TableCommand) -> bool {
         return false;
     };
     if !context.allows(command) {
+        return false;
+    }
+    if command
+        == (TableCommand::Resize {
+            columns: context.columns,
+            rows: context.rows,
+        })
+    {
         return false;
     }
     let end = model.line(table.end).unwrap_or("").chars().count();
@@ -165,6 +212,25 @@ pub fn edit(model: &mut EditorModel, command: TableCommand) -> bool {
             col = target;
         }
         TableCommand::Format => {}
+        TableCommand::Resize {
+            columns,
+            rows: count,
+        } => {
+            rows.resize(count, vec![String::new(); columns]);
+            for cells in &mut rows {
+                // Row-only changes keep hidden overflow source. Growing the
+                // visible columns reveals any existing overflow before padding.
+                let width = if columns < context.columns {
+                    columns
+                } else {
+                    columns.max(cells.len())
+                };
+                cells.resize(width, String::new());
+            }
+            alignments.resize(columns, Alignment::Left);
+            row = row.min(count - 1);
+            col = col.min(columns - 1);
+        }
         TableCommand::DeleteTable => unreachable!(),
     }
     let delimiter = alignments
@@ -600,6 +666,10 @@ impl Table {
             .collect()
     }
 }
+
+#[cfg(test)]
+#[path = "table_resize_tests.rs"]
+mod resize_tests;
 
 #[cfg(test)]
 mod tests {

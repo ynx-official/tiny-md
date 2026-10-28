@@ -4,6 +4,9 @@ use super::*;
 use crate::tables::{TableCommand, TableContext};
 use gpui::{Point, WeakEntity, anchored, deferred};
 
+#[path = "editor_table_size.rs"]
+mod size;
+
 pub(super) const TOOLBAR_HEIGHT: f32 = 26.0;
 
 #[derive(Clone)]
@@ -49,6 +52,7 @@ pub(super) fn inside_html_table(doc: &crate::html::Document, start: usize, end: 
 enum Operation {
     Edit(TableCommand),
     Copy,
+    Size,
 }
 
 struct Item {
@@ -129,6 +133,7 @@ fn items(cell: TableContext) -> Vec<Item> {
             Operation::Edit(Format),
             false,
         ),
+        ("table-size-menu", "调整表格尺寸", Operation::Size, false),
         (
             "table-delete",
             "删除表格",
@@ -144,7 +149,7 @@ fn items(cell: TableContext) -> Vec<Item> {
         separator,
         enabled: match operation {
             Operation::Edit(command) => cell.allows(command),
-            Operation::Copy => true,
+            Operation::Copy | Operation::Size => true,
         },
     })
     .collect()
@@ -172,6 +177,7 @@ pub(super) struct TableMenu {
     scroll: ScrollHandle,
     selected: usize,
     open: bool,
+    size: Option<size::SizePicker>,
 }
 
 impl TableMenu {
@@ -185,7 +191,7 @@ impl TableMenu {
 
     pub(super) fn close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.open = false;
-        if self.focus.is_focused(window) {
+        if self.focus.contains_focused(window, cx) {
             window.focus(&self.return_focus);
         }
         cx.notify();
@@ -208,6 +214,7 @@ impl TableMenu {
                 Operation::Edit(command) => {
                     editor.command(crate::EditorCommand::TableEdit(command), cx)
                 }
+                Operation::Size => editor.open_table_popup(self.position, true, window, cx),
             }
             cx.notify();
         });
@@ -234,6 +241,9 @@ impl Render for TableMenu {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if !self.open {
             return div().into_any_element();
+        }
+        if self.size.is_some() {
+            return self.render_size(window, cx);
         }
         let t = theme(cx);
         let surface = t.surface().hsla();
@@ -378,6 +388,7 @@ impl Render for TableMenu {
 }
 
 pub(super) fn bind_keys(cx: &mut App) {
+    size::bind_keys(cx);
     cx.bind_keys([
         gpui::KeyBinding::new("down", NextItem, Some("TinyMdTableMenu")),
         gpui::KeyBinding::new("tab", NextItem, Some("TinyMdTableMenu")),
@@ -418,6 +429,16 @@ impl MarkdownEditor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.open_table_popup(position, false, window, cx);
+    }
+
+    fn open_table_popup(
+        &mut self,
+        position: Point<Pixels>,
+        sizing: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.read_only || self.source_mode {
             return;
         }
@@ -440,6 +461,7 @@ impl MarkdownEditor {
             focus: cx.focus_handle(),
             scroll: ScrollHandle::new(),
             open: true,
+            size: sizing.then(|| size::SizePicker::new(cell, window, cx)),
         });
         window.focus(&menu.read(cx).focus);
         self.table_menu_changes = Some(cx.observe(&menu, |_, _, cx| cx.notify()));
@@ -473,7 +495,14 @@ impl MarkdownEditor {
                     cx.stop_propagation();
                 })
         };
-        let mut left = div().flex().items_center().gap(px(2.0));
+        let mut left = div().flex().items_center().gap(px(2.0)).child(
+            button("table-size-button", IconName::Grid2X2, "调整表格尺寸").on_click(cx.listener(
+                |this, event: &gpui::ClickEvent, window, cx| {
+                    this.open_table_popup(event.position(), true, window, cx);
+                    cx.stop_propagation();
+                },
+            )),
+        );
         for (id, icon, label, alignment) in [
             (
                 "table-align-left",

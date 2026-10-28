@@ -5,6 +5,197 @@ const SOURCE: &str =
     "前文\n\n| 姓名 | 内容 |\n| --- | ---: |\n| 中文🌱 | `a\\|b` |\n| 第二行 | **粗体** |\n\n后文";
 
 #[gpui::test]
+fn table_size_button_opens_without_changing_source_selection_or_layout(cx: &mut TestAppContext) {
+    cx.update(|cx| guise::Theme::light().init(cx));
+    let (editor, cx) = cx.add_window_view(|window, cx| {
+        let mut editor = MarkdownEditor::new(cx).value(SOURCE);
+        editor.model.move_to(4, 5, false);
+        editor.model.move_to(4, 2, true);
+        window.focus(&editor.focus);
+        editor
+    });
+    draw(cx);
+    let before = cx.read(|app| {
+        let e = editor.read(app);
+        (
+            e.model.cursor(),
+            e.model.selection(),
+            e.layout[7].y.get(),
+            e.scroll.offset(),
+        )
+    });
+    click(cx, "table-size-button");
+    assert!(cx.debug_bounds("table-size-panel").is_some());
+    cx.read(|app| {
+        let e = editor.read(app);
+        assert_eq!(e.text(), SOURCE);
+        assert_eq!(
+            (
+                e.model.cursor(),
+                e.model.selection(),
+                e.layout[7].y.get(),
+                e.scroll.offset()
+            ),
+            before
+        );
+    });
+    cx.simulate_keystrokes("escape");
+    draw(cx);
+    cx.update(|window, app| {
+        editor.update(app, |e, _| {
+            assert!(e.focus.is_focused(window));
+            assert_eq!(e.model.selection(), before.1);
+            assert!(!e.model.undo());
+        })
+    });
+}
+
+#[gpui::test]
+fn table_size_grid_changes_dimensions_in_one_undo_step(cx: &mut TestAppContext) {
+    cx.update(|cx| guise::Theme::dark().init(cx));
+    let (editor, cx) = cx.add_window_view(|window, cx| {
+        let mut editor = MarkdownEditor::new(cx).value(SOURCE);
+        tables::focus_cell(&mut editor.model, 4, 1);
+        window.focus(&editor.focus);
+        editor
+    });
+    draw(cx);
+    click(cx, "table-size-button");
+    let grid_cell = cx.debug_bounds("table-size-cell-4-5").unwrap().center();
+    cx.simulate_mouse_move(grid_cell, None, gpui::Modifiers::none());
+    draw(cx);
+    cx.read(|app| assert_eq!(editor.read(app).text(), SOURCE));
+    click(cx, "table-size-cell-4-5");
+    cx.read(|app| {
+        let e = editor.read(app);
+        let table = &tables::collect(e.model.lines()).0[0];
+        assert_eq!((table.alignments.len(), table.rows.len()), (4, 6));
+        assert_eq!(table.alignments[1], Alignment::Right);
+        assert!(e.text().contains("`a\\|b`"));
+        assert!(!e.table_menu_open(app));
+    });
+    cx.dispatch_action(actions::Undo);
+    draw(cx);
+    cx.read(|app| assert_eq!(editor.read(app).text(), SOURCE));
+}
+
+#[gpui::test]
+fn table_size_shrink_confirms_content_loss_and_blank_shrink_applies_directly(
+    cx: &mut TestAppContext,
+) {
+    cx.update(|cx| guise::Theme::light().init(cx));
+    let (editor, cx) = cx.add_window_view(|window, cx| {
+        let mut editor = MarkdownEditor::new(cx).value(SOURCE);
+        tables::focus_cell(&mut editor.model, 5, 1);
+        window.focus(&editor.focus);
+        editor
+    });
+    draw(cx);
+    click(cx, "table-size-button");
+    click(cx, "table-size-cell-1-1");
+    cx.read(|app| {
+        assert_eq!(editor.read(app).text(), SOURCE);
+        assert!(editor.read(app).table_menu_open(app));
+    });
+    // Cancel the pending deletion without adding a history item.
+    click(cx, "table-size-cancel");
+    editor.update(cx, |e, _| assert!(!e.model.undo()));
+    click(cx, "table-size-button");
+    click(cx, "table-size-cell-1-1");
+    cx.simulate_keystrokes("enter");
+    draw(cx);
+    cx.read(|app| assert_eq!(editor.read(app).text(), "前文\n\n| 姓名 |\n| --- |\n\n后文"));
+    cx.dispatch_action(actions::Undo);
+    draw(cx);
+    cx.read(|app| assert_eq!(editor.read(app).text(), SOURCE));
+    click(cx, "table-size-button");
+    click(cx, "table-size-cell-4-5");
+    click(cx, "table-size-button");
+    click(cx, "table-size-cell-2-3");
+    cx.read(|app| {
+        assert_eq!(editor.read(app).text(), SOURCE);
+        assert!(!editor.read(app).table_menu_open(app));
+    });
+}
+
+#[gpui::test]
+fn table_size_numeric_keyboard_validates_and_applies_beyond_grid(cx: &mut TestAppContext) {
+    cx.update(|cx| guise::Theme::light().init(cx));
+    let (editor, cx) = cx.add_window_view(|window, cx| {
+        let mut editor = MarkdownEditor::new(cx).value(SOURCE);
+        tables::focus_cell(&mut editor.model, 4, 1);
+        window.focus(&editor.focus);
+        editor
+    });
+    draw(cx);
+    cx.simulate_keystrokes("shift-f10 end up enter");
+    draw(cx);
+    assert!(cx.debug_bounds("table-size-panel").is_some());
+    cx.simulate_keystrokes("tab");
+    draw(cx);
+    cx.simulate_input("0");
+    cx.simulate_keystrokes("enter");
+    draw(cx);
+    cx.read(|app| {
+        assert_eq!(editor.read(app).text(), SOURCE);
+        assert!(editor.read(app).table_menu_open(app));
+    });
+    cx.simulate_keystrokes("shift-tab tab");
+    draw(cx);
+    cx.simulate_input("8");
+    cx.simulate_keystrokes("tab");
+    draw(cx);
+    cx.simulate_input("12");
+    draw(cx);
+    cx.read(|app| assert_eq!(editor.read(app).text(), SOURCE));
+    cx.simulate_keystrokes("enter");
+    draw(cx);
+    cx.read(|app| {
+        let e = editor.read(app);
+        let table = &tables::collect(e.model.lines()).0[0];
+        assert_eq!((table.alignments.len(), table.rows.len()), (8, 13));
+        assert!(!e.table_menu_open(app));
+    });
+    cx.dispatch_action(actions::Undo);
+    draw(cx);
+    cx.read(|app| assert_eq!(editor.read(app).text(), SOURCE));
+}
+
+#[gpui::test]
+fn table_size_fits_small_window_and_discards_stale_input(cx: &mut TestAppContext) {
+    cx.update(|cx| guise::Theme::dark().init(cx));
+    let (editor, cx) = cx.add_window_view(|window, cx| {
+        let mut editor = MarkdownEditor::new(cx).value(SOURCE);
+        tables::focus_cell(&mut editor.model, 4, 1);
+        window.focus(&editor.focus);
+        editor
+    });
+    cx.simulate_resize(size(px(320.0), px(240.0)));
+    draw(cx);
+    cx.simulate_keystrokes("shift-f10 end up enter");
+    draw(cx);
+    let panel = cx.debug_bounds("table-size-panel").unwrap();
+    assert!(panel.left() >= px(8.0) && panel.right() <= px(312.0));
+    assert!(panel.top() >= px(8.0) && panel.bottom() <= px(232.0));
+    cx.simulate_keystrokes("tab");
+    cx.simulate_input("9");
+    cx.simulate_keystrokes("escape");
+    draw(cx);
+    cx.update(|window, app| {
+        assert!(editor.read(app).focus.is_focused(window));
+        assert_eq!(editor.read(app).text(), SOURCE);
+    });
+    cx.simulate_keystrokes("shift-f10 end up enter tab");
+    draw(cx);
+    editor.update(cx, |e, cx| {
+        e.apply_external_text(&SOURCE.replace("姓名", "更新"), cx)
+    });
+    draw(cx);
+    cx.read(|app| assert!(!editor.read(app).table_menu_open(app)));
+    cx.update(|window, app| assert!(editor.read(app).focus.is_focused(window)));
+}
+
+#[gpui::test]
 fn table_controls_exclude_markdown_looking_text_inside_html_tables(cx: &mut TestAppContext) {
     cx.update(|cx| guise::Theme::light().init(cx));
     let source = "<table>\n<tr><td>\n| A | B |\n| --- | --- |\n| x | y |\n</td></tr>\n</table>";
