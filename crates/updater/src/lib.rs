@@ -5,8 +5,10 @@ use serde::Deserialize;
 mod download;
 pub mod install;
 mod preferences;
+pub mod routes;
+pub mod signing;
 mod source;
-pub use download::{Cancellation, PreparedUpdate, download, verify_file};
+pub use download::{Cancellation, PreparedUpdate, download, download_routed, verify_file};
 pub use preferences::{CheckMode, Preferences, preferences_path};
 pub use source::{HttpText, ReleaseTransport, check, check_with};
 
@@ -14,7 +16,7 @@ pub const REPOSITORY: &str = "ynx-official/tiny-md";
 pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const MAX_DOWNLOAD: u64 = 1024 * 1024 * 1024;
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 pub struct Asset {
     pub name: String,
     pub url: String,

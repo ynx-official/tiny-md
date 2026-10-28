@@ -1,5 +1,28 @@
 use tiny_md_updater::{is_newer, parse_manifest};
 
+#[test]
+fn update_route_preferences_default_to_auto_and_survive_restart() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("settings.json");
+    std::fs::write(
+        &path,
+        r#"{"mode":"interval","interval_hours":48,"last_checked":123,"auto_download":true}"#,
+    )
+    .unwrap();
+    let legacy = tiny_md_updater::Preferences::load(&path).unwrap();
+    assert_eq!(serde_json::to_value(&legacy).unwrap()["route_mode"], "auto");
+    std::fs::write(&path, r#"{"route_mode":"custom","custom_route":"https://mirror.example/proxy/","last_checked":123,"auto_download":true}"#).unwrap();
+    tiny_md_updater::Preferences::load(&path)
+        .unwrap()
+        .save(&path)
+        .unwrap();
+    let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    assert_eq!(saved["route_mode"], "custom");
+    assert_eq!(saved["custom_route"], "https://mirror.example/proxy/");
+    assert_eq!(saved["last_checked"], 123);
+    assert_eq!(saved["auto_download"], true);
+}
+
 fn manifest() -> serde_json::Value {
     serde_json::json!({
         "schema_version": 1,

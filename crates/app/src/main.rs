@@ -38,6 +38,7 @@ mod sidebar_resize;
 #[cfg(test)]
 mod sidebar_resize_tests;
 mod typography;
+mod update_routes;
 mod updates;
 #[cfg(target_os = "windows")]
 mod windows_menu;

@@ -39,6 +39,15 @@ jobs:
         if: env.RELEASE_SKIP_TESTS != 'true'
         run: python -B -m unittest discover -s scripts -p 'test_*.py'
 
+      - name: Require update signing key
+        env:
+          TINY_MD_UPDATE_SIGNING_KEY: ${{ secrets.TINY_MD_UPDATE_SIGNING_KEY }}
+        run: |
+          if [ -z "$TINY_MD_UPDATE_SIGNING_KEY" ]; then
+            echo 'Configure TINY_MD_UPDATE_SIGNING_KEY before publishing signed updates.' >&2
+            exit 1
+          fi
+
       - name: Validate release metadata
         env:
           RELEASE_TAG: ${{ github.ref_name }}
@@ -227,7 +236,7 @@ jobs:
     name: Publish GitHub Release
     needs: build
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     permissions:
       contents: write
     steps:
@@ -256,13 +265,21 @@ jobs:
           python -B scripts/release_notes.py --tag "$RELEASE_TAG" --output release-assets/release-notes.md
           python -B scripts/update_manifest.py --dist release-assets --tag "$RELEASE_TAG" --repository "$RELEASE_REPOSITORY" --output release-assets/update-manifest.json
 
-      - name: Generate checksums
+      - name: Sign and verify update manifest
+        env:
+          TINY_MD_UPDATE_SIGNING_KEY: ${{ secrets.TINY_MD_UPDATE_SIGNING_KEY }}
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          cargo run --locked -p tiny-md-updater --example sign_manifest -- release-assets/update-manifest.json
+
+      - name: Generate signed asset checksums
         working-directory: release-assets
         run: |
           test "$(find . -maxdepth 1 -name '*.dmg' | wc -l)" -eq 1
           test "$(find . -maxdepth 1 -name '*.exe' | wc -l)" -eq 1
           test "$(find . -maxdepth 1 -name '*.zip' | wc -l)" -eq 2
-          sha256sum tiny-md-*.dmg tiny-md-*.exe tiny-md-*.zip release-notes.md update-manifest.json > SHA256SUMS
+          sha256sum tiny-md-*.dmg tiny-md-*.exe tiny-md-*.zip release-notes.md update-manifest.json update-manifest.json.sig > SHA256SUMS
           sha256sum --check SHA256SUMS
 
       - name: Upload all draft assets and publish

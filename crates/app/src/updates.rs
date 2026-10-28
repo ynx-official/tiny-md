@@ -6,11 +6,12 @@ use gpui_component::{
 };
 use std::{
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicU64, Ordering},
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
+use tiny_md_updater::routes::{ProbeReport, Route, RouteMode};
 use tiny_md_updater::{
     CURRENT_VERSION, Cancellation, CheckMode, Installation, Preferences, PreparedUpdate, Release,
 };
@@ -98,6 +99,93 @@ pub(super) struct UpdateCenter {
     request: u64,
     _progress: Option<Task<()>>,
     _timer: Option<Task<()>>,
+    routes: Arc<Mutex<RouteStatus>>,
+    route_request: u64,
+    download_routes: Vec<Route>,
+    _route_refresh: Option<Task<()>>,
+    check_after_probe: Option<bool>,
+}
+
+#[derive(Clone, Default)]
+pub(super) struct RouteStatus {
+    pub report: ProbeReport,
+    pub probing: bool,
+    pub checked_at: Option<u64>,
+    pub active: Option<Route>,
+    pub message: String,
+}
+pub(super) fn center(cx: &App) -> Entity<UpdateCenter> {
+    cx.global::<Updates>().center.clone()
+}
+pub(super) fn route_status(cx: &App) -> RouteStatus {
+    center(cx).read(cx).routes.lock().unwrap().clone()
+}
+pub(super) fn routes_locked(cx: &App) -> bool {
+    center(cx).read(cx).phase.blocks_check()
+}
+
+pub(super) fn set_route(mode: RouteMode, custom: &str, cx: &mut App) -> anyhow::Result<()> {
+    center(cx).update(cx, |this, cx| {
+        anyhow::ensure!(!this.phase.blocks_check(), "更新正在进行，请稍后修改线路");
+        let mut candidate = this.prefs.clone();
+        candidate.route_mode = mode;
+        candidate.custom_route = if custom.trim().is_empty() {
+            String::new()
+        } else {
+            tiny_md_updater::routes::normalize_custom(custom)?
+        };
+        tiny_md_updater::routes::configured_routes(&candidate)?;
+        candidate.save(
+            this.prefs_path
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("无法找到配置目录"))?,
+        )?;
+        this.prefs = candidate;
+        this.route_request += 1;
+        this.check_after_probe = None;
+        *this.routes.lock().unwrap() = RouteStatus::default();
+        // A release discovered using the previous mode must be checked again;
+        // it cannot silently download through a now-disabled proxy.
+        this.download_routes.clear();
+        this.phase = Phase::Idle;
+        cx.notify();
+        Ok(())
+    })
+}
+
+pub(super) fn probe_routes(cx: &mut App) {
+    center(cx).update(cx, |this, cx| {
+        if this.routes.lock().unwrap().probing
+            || matches!(this.phase, Phase::Checking | Phase::Preparing(..))
+        {
+            return;
+        }
+        this.route_request += 1;
+        let request = this.route_request;
+        let prefs = this.prefs.clone();
+        {
+            let mut status = this.routes.lock().unwrap();
+            status.probing = true;
+            status.message.clear();
+        }
+        let worker = cx
+            .background_executor()
+            .spawn(async move { tiny_md_updater::routes::probe_routes(&prefs) });
+        cx.spawn(async move |this, cx| {
+            let result = worker.await;
+            let _ = this.update(cx, |this, cx| {
+                if !this.complete_probe(request, result) {
+                    return;
+                }
+                cx.notify();
+                if let Some(manual) = this.check_after_probe.take() {
+                    this.check(manual, cx);
+                }
+            });
+        })
+        .detach();
+        cx.notify();
+    });
 }
 struct Updates {
     center: Entity<UpdateCenter>,
@@ -170,6 +258,12 @@ fn now() -> u64 {
         .as_secs()
 }
 
+fn finish_probe_status(routes: &Arc<Mutex<RouteStatus>>) {
+    let mut status = routes.lock().unwrap();
+    status.probing = false;
+    status.checked_at = Some(now());
+}
+
 pub(super) fn init(cx: &mut App) {
     let path = tiny_md_updater::preferences_path().ok();
     init_at(path, cx);
@@ -204,6 +298,11 @@ pub(super) fn init_at(path: Option<std::path::PathBuf>, cx: &mut App) {
         request: 0,
         _progress: None,
         _timer: None,
+        routes: Arc::new(Mutex::new(RouteStatus::default())),
+        route_request: 0,
+        download_routes: Vec::new(),
+        _route_refresh: None,
+        check_after_probe: None,
     });
     cx.set_global(Updates {
         center: center.clone(),
@@ -276,6 +375,60 @@ pub(super) fn show(cx: &mut App, check: bool, current_notes: bool) {
 }
 
 impl UpdateCenter {
+    fn complete_probe(&mut self, request: u64, result: anyhow::Result<ProbeReport>) -> bool {
+        if self.route_request != request {
+            return false;
+        }
+        let mut status = self.routes.lock().unwrap();
+        status.probing = false;
+        status.checked_at = Some(now());
+        match result {
+            Ok(report) => {
+                // Reorder a pending download only when the probe authenticates
+                // the same release. Never switch a running or prepared transfer.
+                if let Phase::Available(release) = &self.phase {
+                    if report.release.as_ref().is_some_and(|candidate| {
+                        candidate.version == release.version && candidate.assets == release.assets
+                    }) {
+                        self.download_routes = report.routes.clone();
+                        status.active = report.routes.first().cloned();
+                    }
+                } else if !matches!(
+                    self.phase,
+                    Phase::Downloading { .. } | Phase::Ready(..) | Phase::Preparing(..)
+                ) {
+                    status.active = report.routes.first().cloned();
+                }
+                status.report = report;
+            }
+            Err(error) => {
+                status.message = error.to_string();
+                status.report = ProbeReport::default();
+                if !self.phase.blocks_check() {
+                    status.active = None;
+                }
+            }
+        }
+        true
+    }
+    fn watch_routes(&mut self, cx: &mut Context<Self>) {
+        self._route_refresh = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(150))
+                    .await;
+                let keep = this
+                    .update(cx, |this, cx| {
+                        cx.notify();
+                        matches!(this.phase, Phase::Checking)
+                    })
+                    .unwrap_or(false);
+                if !keep {
+                    break;
+                }
+            }
+        }));
+    }
     fn persist(&mut self) {
         if let Some(path) = &self.prefs_path
             && let Err(e) = self.prefs.save(path)
@@ -287,23 +440,51 @@ impl UpdateCenter {
         if self.phase.blocks_check() {
             return;
         }
+        if self.routes.lock().unwrap().probing {
+            self.check_after_probe = Some(manual);
+            return;
+        }
         self.phase = Phase::Checking;
+        self.route_request += 1;
+        self.download_routes.clear();
+        {
+            let mut status = self.routes.lock().unwrap();
+            status.probing = true;
+            status.active = None;
+            status.message.clear();
+        }
+        self.watch_routes(cx);
         self.notice.clear();
         self.current_notes = false;
         self.prefs.last_checked = now();
         self.persist();
         self.request += 1;
         let request = self.request;
-        let task = cx
-            .background_executor()
-            .spawn(async { tiny_md_updater::check() });
+        let prefs = self.prefs.clone();
+        let status = self.routes.clone();
+        let task = cx.background_executor().spawn(async move {
+            tiny_md_updater::routes::check_routed(&prefs, |report| {
+                let mut status = status.lock().unwrap();
+                status.report = report.clone();
+                status.checked_at = Some(now());
+                status.probing = false;
+            })
+        });
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |this, cx| {
                 if this.request != request {
                     return;
                 }
-                match result.and_then(|release| {
+                finish_probe_status(&this.routes);
+                match result.and_then(|report| {
+                    this.download_routes = report.routes.clone();
+                    let mut status = this.routes.lock().unwrap();
+                    status.active = report.routes.first().cloned();
+                    status.report = report.clone();
+                    let release = report
+                        .release
+                        .ok_or_else(|| anyhow::anyhow!("更新结果缺少版本"))?;
                     tiny_md_updater::is_newer(CURRENT_VERSION, &release.version)
                         .map(|newer| (release, newer))
                 }) {
@@ -344,6 +525,11 @@ impl UpdateCenter {
         let Some(kind) = self.kind else {
             return;
         };
+        if self.download_routes.is_empty() {
+            self.notice = "请先重新检查更新，获取可用下载线路".into();
+            cx.notify();
+            return;
+        }
         let cancel = Cancellation::default();
         let progress = Arc::new(AtomicU64::new(0));
         let total = Arc::new(AtomicU64::new(0));
@@ -379,11 +565,27 @@ impl UpdateCenter {
         }));
         let worker_release = release.clone();
         let worker_cancel = cancel.clone();
+        let routes = self.download_routes.clone();
+        let route_status = self.routes.clone();
         let task = cx.background_executor().spawn(async move {
-            tiny_md_updater::download(&worker_release, kind, &worker_cancel, |done, size| {
-                progress.store(done, Ordering::Relaxed);
-                total.store(size, Ordering::Relaxed);
-            })
+            tiny_md_updater::download_routed(
+                &worker_release,
+                kind,
+                &routes,
+                &worker_cancel,
+                |done, size| {
+                    progress.store(done, Ordering::Relaxed);
+                    total.store(size, Ordering::Relaxed);
+                },
+                |route| {
+                    let mut status = route_status.lock().unwrap();
+                    status.message = match &status.active {
+                        Some(old) if old != route => format!("正在切换至 {}", route.label()),
+                        _ => String::new(),
+                    };
+                    status.active = Some(route.clone());
+                },
+            )
         });
         cx.spawn(async move |this, cx| {
             let result = task.await;
@@ -566,8 +768,10 @@ impl Render for UpdateCenter {
         let ink = rgb(if dark { 0xe4e6e9 } else { 0x37352f });
         let muted = rgb(if dark { 0xb2b7bf } else { 0x787671 });
         let border = rgb(if dark { 0x34383f } else { 0xe5e3df });
+        let route_status = self.routes.lock().unwrap().clone();
         let status: String = match &self.phase {
             Phase::Idle => "尚未检查更新".into(),
+            Phase::Checking if route_status.probing => "正在检测更新线路……".into(),
             Phase::Checking => "正在检查更新……".into(),
             Phase::Current(_) => "已是最新版本".into(),
             Phase::Available(_) => "发现新版本".into(),
@@ -805,6 +1009,22 @@ impl Render for UpdateCenter {
                     )
                     .child(status),
             );
+        if let Some(route) = &route_status.active {
+            header = header.child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(muted)
+                    .child(format!("更新线路：{}", route.label())),
+            );
+        }
+        if !route_status.message.is_empty() {
+            header = header.child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(muted)
+                    .child(route_status.message),
+            );
+        }
         if let Phase::Downloading {
             progress, total, ..
         } = &self.phase
@@ -1060,6 +1280,88 @@ mod preference_tests {
     }
 
     #[gpui::test]
+    fn route_settings_preserve_schedule_are_atomic_and_lock_during_transfer(
+        cx: &mut TestAppContext,
+    ) {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("settings.json");
+        cx.update(|cx| {
+            init_at(Some(path.clone()), cx);
+            set_preferences(CheckMode::Interval, 72, cx).unwrap();
+            set_auto_download(true, cx).unwrap();
+            let center = center(cx);
+            center.update(cx, |this, _| this.prefs.last_checked = 123);
+            set_route(RouteMode::GhFast, "", cx).unwrap();
+            let saved = Preferences::load(&path).unwrap();
+            assert_eq!(saved.route_mode, RouteMode::GhFast);
+            assert_eq!(saved.last_checked, 123);
+            assert_eq!(saved.interval_hours, 72);
+            assert!(saved.auto_download);
+            assert!(set_route(RouteMode::Custom, "http://bad.example/", cx).is_err());
+            assert_eq!(preferences(cx).route_mode, RouteMode::GhFast);
+            let blocked = root.path().join("blocked");
+            std::fs::write(&blocked, "not a directory").unwrap();
+            center.update(cx, |this, _| {
+                this.prefs_path = Some(blocked.join("settings.json"))
+            });
+            assert!(set_route(RouteMode::Github, "", cx).is_err());
+            assert_eq!(preferences(cx).route_mode, RouteMode::GhFast);
+            center.update(cx, |this, _| {
+                this.prefs_path = Some(path.clone());
+                this.phase = Phase::Checking;
+            });
+            assert!(set_route(RouteMode::Github, "", cx).is_err());
+            assert_eq!(
+                Preferences::load(&path).unwrap().route_mode,
+                RouteMode::GhFast
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn manual_probe_preserves_schedule_transfer_and_rejects_stale_results(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            init_at(None, cx);
+            center(cx).update(cx, |this, _| {
+                this.prefs.last_checked = 123;
+                this.route_request = 7;
+                this.routes.lock().unwrap().probing = true;
+                let mut report = ProbeReport::default();
+                report.routes = vec![Route::github()];
+                assert!(!this.complete_probe(6, Ok(report.clone())));
+                assert!(this.routes.lock().unwrap().probing);
+                assert!(this.complete_probe(7, Ok(report.clone())));
+                assert_eq!(this.prefs.last_checked, 123);
+                assert!(matches!(this.phase, Phase::Idle));
+                let active = Route {
+                    mode: RouteMode::GhFast,
+                    prefix: "https://ghfast.top/".into(),
+                };
+                this.routes.lock().unwrap().active = Some(active.clone());
+                this.phase = Phase::Downloading {
+                    release: Release {
+                        version: "v1.0.0".into(),
+                        notes: String::new(),
+                        assets: Vec::new(),
+                    },
+                    cancel: Cancellation::default(),
+                    progress: Arc::new(AtomicU64::new(10)),
+                    total: Arc::new(AtomicU64::new(100)),
+                    automatic: false,
+                };
+                assert!(this.complete_probe(7, Ok(report)));
+                assert_eq!(this.routes.lock().unwrap().active, Some(active));
+                assert_eq!(this.prefs.last_checked, 123);
+                assert!(matches!(this.phase, Phase::Downloading { .. }));
+            });
+            assert!(
+                cx.windows().is_empty(),
+                "manual probing never opens update windows"
+            );
+        });
+    }
+
+    #[gpui::test]
     fn disabling_background_download_cancels_only_automatic_tasks_and_saves_atomically(
         cx: &mut TestAppContext,
     ) {
@@ -1229,6 +1531,11 @@ mod preference_tests {
                     request: 0,
                     _progress: None,
                     _timer: None,
+                    routes: Arc::new(Mutex::new(RouteStatus::default())),
+                    route_request: 0,
+                    download_routes: Vec::new(),
+                    _route_refresh: None,
+                    check_after_probe: None,
                 });
                 cx.update(|window, cx| {
                     crate::apply_theme(dark, window, cx);

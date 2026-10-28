@@ -124,10 +124,27 @@ class ReleaseToolsTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             update_manifest.generate(dist, self.tag)
 
+    def test_manifest_authenticates_notes_and_accepts_detached_signature_on_regeneration(self):
+        dist = self.prepare_assets()
+        manifest = update_manifest.generate(dist, self.tag)
+        self.assertEqual(manifest.get('notes_digest'), 'sha256:' + hashlib.sha256((dist / 'release-notes.md').read_bytes()).hexdigest())
+        (dist / 'update-manifest.json.sig').write_text('00' * 64)
+        self.assertEqual(update_manifest.generate(dist, self.tag), manifest)
+
+    def test_unsigned_draft_is_rejected_before_any_remote_mutation(self):
+        dist = self.prepare_assets()
+        (dist / 'SHA256SUMS').write_text('checksum')
+        (dist / 'update-manifest.json').write_text('{}')
+        with patch.object(publish_release, 'gh') as gh:
+            with self.assertRaises(ValueError):
+                publish_release.publish(self.tag, dist)
+            gh.assert_not_called()
+
     def test_public_release_with_changed_assets_cannot_be_overwritten(self):
         dist = self.prepare_assets()
         (dist / 'SHA256SUMS').write_text('current checksum')
         (dist / 'update-manifest.json').write_text('{}')
+        (dist / 'update-manifest.json.sig').write_text('00' * 64)
         calls = []
         def fake_gh(*args, **kwargs):
             calls.append(args)
@@ -146,6 +163,7 @@ class ReleaseToolsTests(unittest.TestCase):
         dist = self.prepare_assets()
         (dist / 'SHA256SUMS').write_text('checksum')
         (dist / 'update-manifest.json').write_text('{}')
+        (dist / 'update-manifest.json.sig').write_text('00' * 64)
         calls = []
         def fake_gh(*args, **kwargs):
             calls.append(args)
@@ -167,6 +185,7 @@ class ReleaseToolsTests(unittest.TestCase):
         dist = self.prepare_assets()
         (dist / 'SHA256SUMS').write_text('checksum')
         (dist / 'update-manifest.json').write_text('{}')
+        (dist / 'update-manifest.json.sig').write_text('00' * 64)
         calls = []
         def fake_gh(*args, **kwargs):
             calls.append(args)
@@ -184,6 +203,7 @@ class ReleaseToolsTests(unittest.TestCase):
         dist = self.prepare_assets()
         (dist / 'SHA256SUMS').write_text('checksum')
         (dist / 'update-manifest.json').write_text('{}')
+        (dist / 'update-manifest.json.sig').write_text('00' * 64)
         calls = []
         def fake_gh(*args, **kwargs):
             calls.append(args)

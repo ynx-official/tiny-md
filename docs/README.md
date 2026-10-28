@@ -8,6 +8,9 @@
 |---|---|
 | [UI 风格](02-design/ui-style.md) | 已确认的 notion 风格、原生应用适配、侧栏虚线调宽与正文 / 侧栏滚动条 |
 | [偏好设置与更新窗口](02-design/preferences.md) | 文件菜单入口、三档夜间模式与系统主题跟随、设置持久化、后台下载和更新窗口重新排版 |
+| [更新线路与测速](02-design/update-routes.md) | 自动择优、手动测速、指定与自定义线路、失败切换和旧清单兼容 |
+| [更新线路验证](04-quality/update-routes.md) | 线路选择、签名、下载切换、配置和 Windows 原生验证证据 |
+| [更新发布签名](05-operations/update-signing.md) | Ed25519 密钥配置、签名附件、发布顺序与过渡规则 |
 | [正文排版偏好](02-design/typography.md) | 正文宽度、字体、字号、行高与段落间距调节、多窗口同步、默认值与源码保护 |
 | [应用图标](02-design/application-icons.md) | Windows 留白与 DPI 尺寸、macOS 独立素材、导出及资源核对 |
 | [外部文件同步](02-design/external-file-sync.md) | 自动同步、三方合并、冲突处理与撤销保护 |
@@ -45,6 +48,7 @@
 | [v0.2.14 版本详情](06-delivery/versions/v0.2.14.md) | Markdown HTML 混排、可见功能标记及 SVG 字体内存优化 |
 | [v0.2.15 版本详情](06-delivery/versions/v0.2.15.md) | Markdown 表格编辑工具、夜间模式与持久化最近文件 |
 | [v0.2.16 版本详情](06-delivery/versions/v0.2.16.md) | 正文宽度、字体、字号、行高和段落间距偏好 |
+| [v0.2.17 版本详情](06-delivery/versions/v0.2.17.md) | 更新线路自动择优、手动测速、固定/自定义线路与签名清单 |
 | [v0.2.12 未发布记录](99-archive/v0.2.12-failed-release.md) | Clippy 检查失败与补丁版本替代 |
 | [v0.2.8 未发布记录](99-archive/v0.2.8-failed-release.md) | CI Clippy 失败、未公开 Release 与替代版本 |
 | [v0.2.7 版本详情](06-delivery/versions/v0.2.7.md) | 双平台段落空行修复与本次跳过测试的发布记录 |

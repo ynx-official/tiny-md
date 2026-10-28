@@ -2,7 +2,7 @@ use crate::typography::{Typography, TypographyControls};
 use anyhow::{Context as _, Result};
 use gpui::{prelude::*, *};
 use gpui_component::{
-    Root, TitleBar,
+    Disableable, Root, TitleBar,
     button::{Button, ButtonVariants},
     input::{Input, InputEvent, InputState},
     select::{Select, SelectEvent, SelectState},
@@ -254,7 +254,7 @@ pub(super) fn show(category: Category, cx: &mut App) {
         });
         return;
     }
-    let bounds = Bounds::centered(None, size(px(780.0), px(540.0)), cx);
+    let bounds = Bounds::centered(None, size(px(900.0), px(700.0)), cx);
     let result = cx.open_window(
         WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -299,6 +299,7 @@ struct PreferencesView {
     update_mode: Entity<SelectState<Vec<&'static str>>>,
     interval: Entity<InputState>,
     typography: Entity<TypographyControls>,
+    routes: Entity<crate::update_routes::RouteControls>,
     notice: String,
     _subscriptions: Vec<Subscription>,
 }
@@ -341,6 +342,7 @@ impl PreferencesView {
             input.set_value(prefs.interval_hours.to_string(), window, cx)
         });
         let subscriptions = vec![
+            cx.observe(&crate::updates::center(cx), |_, _, cx| cx.notify()),
             cx.subscribe_in(
                 &theme,
                 window,
@@ -398,6 +400,7 @@ impl PreferencesView {
             update_mode,
             interval,
             typography: cx.new(|cx| TypographyControls::new(window, cx)),
+            routes: cx.new(|cx| crate::update_routes::RouteControls::new(window, cx)),
             notice: String::new(),
             _subscriptions: subscriptions,
         }
@@ -509,11 +512,26 @@ impl Render for PreferencesView {
             .flex()
             .flex_col()
             .gap_6()
+            .when(self.category == Category::Updates, |content| {
+                content.gap_4()
+            })
             .child(
                 div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
                     .text_size(px(22.0))
                     .font_weight(FontWeight::SEMIBOLD)
-                    .child(heading),
+                    .child(heading)
+                    .when(self.category == Category::Updates, |header| {
+                        header.child(
+                            div()
+                                .text_size(px(13.0))
+                                .font_weight(FontWeight::NORMAL)
+                                .text_color(muted)
+                                .child(format!("Tiny MD {}", tiny_md_updater::CURRENT_VERSION)),
+                        )
+                    }),
             );
         content = match self.category {
             Category::Typography => content.child(self.typography.clone()),
@@ -585,17 +603,15 @@ impl Render for PreferencesView {
                         .text_color(muted)
                         .child("发现新版后后台下载，校验完成再弹出更新页。安装仍需确认。"),
                 )
-                .child(row(
-                    "当前版本",
-                    div()
-                        .child(format!("Tiny MD {}", tiny_md_updater::CURRENT_VERSION))
-                        .into_any_element(),
-                ))
+                .child(self.routes.clone())
                 .child(
-                    Button::new("prefs-check-update")
-                        .label("检查更新")
-                        .w(px(120.0))
-                        .on_click(|_, _, cx| crate::updates::show(cx, true, false)),
+                    div().debug_selector(|| "prefs-check-update".into()).child(
+                        Button::new("prefs-check-update")
+                            .label("检查更新")
+                            .disabled(crate::updates::routes_locked(cx))
+                            .w(px(120.0))
+                            .on_click(|_, _, cx| crate::updates::show(cx, true, false)),
+                    ),
                 ),
         };
         let error = &cx.global::<PreferencesState>().error;
@@ -1005,6 +1021,32 @@ mod tests {
     }
 
     #[gpui::test]
+    fn update_route_controls_are_visible_in_the_approved_layout(cx: &mut TestAppContext) {
+        let root = tempfile::tempdir().unwrap();
+        setup(cx, root.path());
+        let (_, cx) =
+            cx.add_window_view(|window, cx| PreferencesView::new(Category::Updates, window, cx));
+        cx.simulate_resize(size(px(900.0), px(700.0)));
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+        });
+        assert!(
+            cx.debug_bounds("prefs-update-route").is_some(),
+            "route selector is visible"
+        );
+        assert!(
+            cx.debug_bounds("prefs-probe-routes").is_some(),
+            "manual probe is visible"
+        );
+        assert!(
+            cx.debug_bounds("prefs-route-status").is_some(),
+            "route status list is visible"
+        );
+    }
+
+    #[gpui::test]
     fn settings_controls_save_update_choices_and_reject_invalid_interval(cx: &mut TestAppContext) {
         let root = tempfile::tempdir().unwrap();
         setup(cx, root.path());
@@ -1137,6 +1179,25 @@ mod tests {
                 assert!(done.origin.y >= px(0.0) && done.bottom() <= px(430.0));
                 let category = cx.debug_bounds("prefs-updates").unwrap();
                 assert!(category.origin.x >= px(0.0) && category.right() <= px(640.0));
+                if cx.read(|cx| view.read(cx).category == Category::Updates) {
+                    let viewport = cx.debug_bounds("preferences-content").unwrap();
+                    let route = cx.debug_bounds("prefs-update-route").unwrap();
+                    assert!(route.left() >= viewport.left() && route.right() <= viewport.right());
+                    cx.simulate_event(ScrollWheelEvent {
+                        position: viewport.center(),
+                        delta: ScrollDelta::Pixels(point(px(0.0), px(-1000.0))),
+                        ..Default::default()
+                    });
+                    cx.run_until_parked();
+                    cx.update(|window, cx| {
+                        window.draw(cx).clear();
+                    });
+                    let check = cx.debug_bounds("prefs-check-update").unwrap();
+                    assert!(
+                        check.top() >= viewport.top() && check.bottom() <= viewport.bottom(),
+                        "check updates remains reachable by scrolling at minimum size"
+                    );
+                }
                 if cx.read(|cx| view.read(cx).category == Category::Typography) {
                     let viewport = cx.debug_bounds("preferences-content").unwrap();
                     let font = cx.debug_bounds("typography-font").unwrap();

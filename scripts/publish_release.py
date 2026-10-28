@@ -16,7 +16,7 @@ def publish(tag, assets):
     parse_tag(tag)
     notes = assets / 'release-notes.md'
     sums = assets / 'SHA256SUMS'
-    for required in [notes, sums, assets / 'update-manifest.json']:
+    for required in [notes, sums, assets / 'update-manifest.json', assets / 'update-manifest.json.sig']:
         if not required.is_file():
             raise ValueError(f'缺少发布产物：{required}')
     existing = gh('release', 'view', tag, '--json', 'isDraft', check=False)

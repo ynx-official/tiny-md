@@ -21,6 +21,8 @@ pub struct Preferences {
     pub interval_hours: u32,
     pub last_checked: u64,
     pub auto_download: bool,
+    pub route_mode: crate::routes::RouteMode,
+    pub custom_route: String,
 }
 impl Default for Preferences {
     fn default() -> Self {
@@ -29,6 +31,8 @@ impl Default for Preferences {
             interval_hours: 24,
             last_checked: 0,
             auto_download: false,
+            route_mode: crate::routes::RouteMode::Auto,
+            custom_route: String::new(),
         }
     }
 }
@@ -38,6 +42,7 @@ impl Preferences {
             Ok(bytes) => {
                 let mut prefs: Self = serde_json::from_slice(&bytes).context("更新设置格式错误")?;
                 prefs.interval_hours = prefs.interval_hours.clamp(1, 8760);
+                crate::routes::configured_routes(&prefs)?;
                 Ok(prefs)
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),

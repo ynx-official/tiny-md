@@ -31,7 +31,7 @@ def generate(dist, tag, repository=REPOSITORY):
     files = {p.name: p for p in dist.iterdir()}
     if any(p.is_symlink() or not p.is_file() for p in files.values()):
         raise ValueError('发布产物不能是目录或符号链接')
-    metadata = {'release-notes.md', 'SHA256SUMS', 'update-manifest.json'}
+    metadata = {'release-notes.md', 'SHA256SUMS', 'update-manifest.json', 'update-manifest.json.sig'}
     actual = set(files) - metadata
     if actual != expected:
         raise ValueError(f'发布产物不完整：缺少 {expected - actual}，多余 {actual - expected}')
@@ -47,7 +47,8 @@ def generate(dist, tag, repository=REPOSITORY):
         with path.open('rb') as content:
             digest = hashlib.file_digest(content, 'sha256').hexdigest()
         assets.append({'name': name, 'url': f'{base}/{quote(name, safe="")}', 'size': size, 'digest': f'sha256:{digest}'})
-    return {'schema_version': 1, 'version': tag, 'notes_url': f'{base}/release-notes.md', 'assets': assets}
+    notes_digest = 'sha256:' + hashlib.sha256(files['release-notes.md'].read_bytes()).hexdigest()
+    return {'schema_version': 1, 'version': tag, 'notes_url': f'{base}/release-notes.md', 'notes_digest': notes_digest, 'assets': assets}
 
 
 def main():

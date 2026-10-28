@@ -1,6 +1,5 @@
 use crate::{
-    Asset, CURRENT_VERSION, Installation, MAX_DOWNLOAD, Release, redirect_policy, validate_asset,
-    validate_digest,
+    Asset, CURRENT_VERSION, Installation, MAX_DOWNLOAD, Release, validate_asset, validate_digest,
 };
 use anyhow::{Context, Result, ensure};
 use sha2::{Digest, Sha256};
@@ -109,15 +108,74 @@ pub fn download(
     cancel: &Cancellation,
     progress: impl FnMut(u64, u64),
 ) -> Result<PreparedUpdate> {
+    download_routed(
+        release,
+        kind,
+        &[crate::routes::Route::github()],
+        cancel,
+        progress,
+        |_| {},
+    )
+}
+
+/// Each attempt uses a fresh temporary archive. Only transport failures allow
+/// failover; cancellation, disk errors and integrity failures are terminal.
+pub fn download_routed(
+    release: &Release,
+    kind: Installation,
+    routes: &[crate::routes::Route],
+    cancel: &Cancellation,
+    mut progress: impl FnMut(u64, u64),
+    mut on_route: impl FnMut(&crate::routes::Route),
+) -> Result<PreparedUpdate> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
-    runtime.block_on(download_async(release, kind, cancel, progress))
+    try_routes(routes, cancel, |route| {
+        on_route(route);
+        progress(0, 0);
+        runtime.block_on(download_async(release, kind, route, cancel, &mut progress))
+    })
+}
+
+fn try_routes<T>(
+    routes: &[crate::routes::Route],
+    cancel: &Cancellation,
+    mut attempt: impl FnMut(&crate::routes::Route) -> Result<T>,
+) -> Result<T> {
+    ensure!(!routes.is_empty(), "没有通过校验的下载线路，请重新检查更新");
+    for (index, route) in routes.iter().enumerate() {
+        ensure!(!cancel.is_cancelled(), "下载已取消");
+        match attempt(route) {
+            Ok(value) => return Ok(value),
+            Err(error) => {
+                ensure!(!cancel.is_cancelled(), "下载已取消");
+                let retry = error.downcast_ref::<reqwest::Error>().is_some_and(|e| {
+                    !e.is_redirect()
+                        && (e.is_timeout()
+                            || e.is_connect()
+                            || e.is_body()
+                            || e.is_request()
+                            || e.status().is_some_and(|s| {
+                                matches!(s.as_u16(), 403 | 404 | 408 | 429 | 500..=599)
+                            }))
+                });
+                if !retry || index + 1 == routes.len() {
+                    if error.is::<reqwest::Error>() {
+                        anyhow::bail!("{} 下载连接失败，请重新检测线路后重试", route.label());
+                    }
+                    return Err(error);
+                }
+            }
+        }
+    }
+    unreachable!()
 }
 
 async fn download_async(
     release: &Release,
     kind: Installation,
+    route: &crate::routes::Route,
     cancel: &Cancellation,
     mut progress: impl FnMut(u64, u64),
 ) -> Result<PreparedUpdate> {
@@ -126,7 +184,8 @@ async fn download_async(
     ensure!(!cancel.is_cancelled(), "下载已取消");
     let client = reqwest::Client::builder()
         .https_only(true)
-        .redirect(redirect_policy())
+        .redirect(route.redirect_policy())
+        .referer(false)
         .user_agent(format!("tiny-md/{CURRENT_VERSION}"))
         .connect_timeout(Duration::from_secs(10))
         .read_timeout(Duration::from_secs(30))
@@ -134,7 +193,7 @@ async fn download_async(
         .build()?;
     let response = tokio::select! {
         _ = cancel.cancelled() => anyhow::bail!("下载已取消"),
-        result = client.get(&asset.url).send() => result?,
+        result = client.get(route.url(&asset.url)?).send() => result?,
     };
     let mut response = response.error_for_status()?;
     let total = response.content_length().unwrap_or(asset.size);
@@ -273,6 +332,70 @@ pub(crate) fn extract(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn transport_failover_is_bounded_and_integrity_or_cancellation_never_retries() {
+        use crate::routes::{Route, RouteMode};
+        let routes = [
+            Route::github(),
+            Route {
+                mode: RouteMode::GhProxy,
+                prefix: "https://gh-proxy.com/".into(),
+            },
+        ];
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut request = [0; 1024];
+            assert!(stream.read(&mut request).unwrap() > 0);
+            stream.write_all(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+        });
+        let mut network_error = Some(
+            reqwest::blocking::Client::builder()
+                .no_proxy()
+                .timeout(Duration::from_secs(2))
+                .build()
+                .unwrap()
+                .get(format!("http://{address}"))
+                .send()
+                .unwrap()
+                .error_for_status()
+                .unwrap_err(),
+        );
+        server.join().unwrap();
+        let mut calls = Vec::new();
+        let chosen = try_routes(&routes, &Cancellation::default(), |route| {
+            calls.push(route.mode);
+            match network_error.take() {
+                Some(error) => Err(error.into()),
+                None => Ok(route.mode),
+            }
+        })
+        .unwrap();
+        assert_eq!(chosen, RouteMode::GhProxy);
+        assert_eq!(calls, vec![RouteMode::Github, RouteMode::GhProxy]);
+        for cancelled in [false, true] {
+            let cancel = Cancellation::default();
+            let mut calls = 0;
+            let result: Result<()> = try_routes(&routes, &cancel, |_| {
+                calls += 1;
+                if cancelled {
+                    cancel.cancel();
+                }
+                anyhow::bail!("下载 SHA-256 校验失败")
+            });
+            assert!(result.is_err());
+            assert_eq!(calls, 1);
+        }
+        let cancel = Cancellation::default();
+        cancel.cancel();
+        let result: Result<()> =
+            try_routes(&routes, &cancel, |_| panic!("cancelled before network"));
+        assert!(result.is_err());
+    }
     const ABC: &str = "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
     #[test]
     fn stream_checks_truncation_extra_bytes_and_digest() {
