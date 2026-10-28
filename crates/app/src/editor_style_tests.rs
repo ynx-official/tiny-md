@@ -10,6 +10,73 @@ fn draw(cx: &mut VisualTestContext) {
 }
 
 #[gpui::test]
+fn typography_is_applied_to_document_geometry_and_survives_theme_changes(cx: &mut TestAppContext) {
+    file_open_tests::init(cx);
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("preferences.json");
+    std::fs::write(&path, r#"{"theme":"light","typography":{"content_width":1140,"font_size":18,"line_height":2,"paragraph_spacing":0.75}}"#).unwrap();
+    cx.update(|cx| {
+        preferences::init_at(Some(path), cx);
+    });
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        let mut view = TinyMd::new(None, window, cx);
+        view.install(
+            Document::untitled("first\n\nsecond"),
+            "first\n\nsecond",
+            window,
+            cx,
+        );
+        view
+    });
+    cx.simulate_resize(size(px(1800.0), px(800.0)));
+    for dark in [false, true, false] {
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                view.select_theme(
+                    if dark {
+                        preferences::ThemePreference::Dark
+                    } else {
+                        preferences::ThemePreference::Light
+                    },
+                    window,
+                    cx,
+                )
+            })
+        });
+        draw(cx);
+        draw(cx);
+        assert_eq!(
+            cx.debug_bounds("document-text-column").unwrap().size.width,
+            px(1172.0)
+        );
+        cx.update(|window, cx| {
+            view.read(cx).editor.clone().update(cx, |editor, cx| {
+                let first = editor
+                    .bounds_for_range(0..0, Bounds::default(), window, cx)
+                    .unwrap();
+                let second = editor
+                    .bounds_for_range(7..7, Bounds::default(), window, cx)
+                    .unwrap();
+                assert_eq!(first.size.height, px(36.0));
+                assert_eq!(second.top() - first.top(), px(63.0));
+                assert_eq!(editor.text(), "first\n\nsecond");
+            })
+        });
+        cx.read(|cx| assert!(!view.read(cx).dirty));
+    }
+    view.update(cx, |view, cx| {
+        view.toggle_sidebar(cx);
+    });
+    cx.simulate_resize(size(px(700.0), px(600.0)));
+    draw(cx);
+    draw(cx);
+    let column = cx.debug_bounds("document-text-column").unwrap();
+    let pane = cx.debug_bounds("document-editor-pane").unwrap();
+    assert!(column.left() >= pane.left() && column.right() <= pane.right());
+    assert!(column.size.width < px(1172.0));
+}
+
+#[gpui::test]
 fn platform_styles_share_paragraph_spacing_across_theme_changes(cx: &mut TestAppContext) {
     let original = "# 标题\n\n第一段。\n\n第二段。";
     let first = "# 标题\n\n".encode_utf16().count();

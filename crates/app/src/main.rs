@@ -37,6 +37,7 @@ mod sidebar_navigation_tests;
 mod sidebar_resize;
 #[cfg(test)]
 mod sidebar_resize_tests;
+mod typography;
 mod updates;
 #[cfg(target_os = "windows")]
 mod windows_menu;
@@ -111,8 +112,9 @@ fn apply_theme(dark: bool, window: &mut Window, cx: &mut App) {
             let _ = view.update(cx, |this, cx| {
                 if this.dark != dark {
                     this.dark = dark;
+                    let style = preferences::typography(cx).editor_style(dark);
                     this.editor
-                        .update(cx, |editor, cx| editor.set_style(editor_style(dark), cx));
+                        .update(cx, |editor, cx| editor.set_style(style, cx));
                     cx.notify();
                 }
             });
@@ -438,12 +440,13 @@ impl TinyMd {
             cx.notify();
         })
         .detach();
+        let typography = preferences::typography(cx);
         let editor = cx.new(|cx| {
             let mut editor = MarkdownEditor::new(cx)
                 .value(text)
-                .font_size(16.0)
+                .font_size(typography.font_size as f32)
                 .placeholder("从一个想法开始……")
-                .style(editor_style(dark));
+                .style(typography.editor_style(dark));
             editor.set_document_path(document.path(), cx);
             editor
         });
@@ -563,7 +566,7 @@ impl TinyMd {
             read_only: false,
             focus_mode: false,
             typewriter: false,
-            font_size: 16.0,
+            font_size: typography.font_size as f32,
             search_open: false,
             replace_open: false,
             query,
@@ -959,8 +962,9 @@ impl TinyMd {
         }
         let dark = mode.is_dark(window.appearance());
         self.dark = dark;
+        let style = preferences::typography(cx).editor_style(dark);
         self.editor
-            .update(cx, |editor, cx| editor.set_style(editor_style(dark), cx));
+            .update(cx, |editor, cx| editor.set_style(style, cx));
         cx.notify();
     }
 
@@ -1076,7 +1080,7 @@ impl TinyMd {
 
     fn zoom(&mut self, delta: f32, cx: &mut Context<Self>) {
         self.font_size = if delta == 0.0 {
-            16.0
+            preferences::typography(cx).font_size as f32
         } else {
             (self.font_size + delta).clamp(12.0, 30.0)
         };
@@ -1353,12 +1357,12 @@ impl Render for TinyMd {
                     .pb(editor_bottom)
                     .child(
                         div()
+                            .debug_selector(|| "document-text-column".into())
                             .w_full()
-                            .max_w(px(if cfg!(target_os = "windows") {
-                                1080.0
-                            } else {
-                                900.0
-                            }))
+                            .max_w(px(MarkdownEditor::container_width(
+                                preferences::typography(cx).content_width as f32,
+                            )))
+                            .font_family(preferences::typography(cx).font_family())
                             .h_full()
                             .child(self.editor.clone()),
                     )

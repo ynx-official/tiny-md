@@ -21,6 +21,14 @@
 
 详细变化见版本详情。
 
+## [0.2.16] - 2026-10-28
+
+### 新增
+
+- 偏好设置新增正文宽度、字体、字号、行高与段落间距调节，默认正文宽度为 1140 px，支持跨重启保存、同步所有文档窗口及恢复默认。
+
+详细变化见版本详情。
+
 ## [Unreleased]
 
 ## [0.2.14] - 2026-10-27
@@ -183,6 +191,7 @@
 - 首次提供 macOS Apple Silicon DMG 和 Windows x64 安装包。
 - 原生 Markdown 写作窗口与基本文档操作。
 
+[0.2.16]: docs/06-delivery/versions/v0.2.16.md
 [0.2.15]: docs/06-delivery/versions/v0.2.15.md
 [0.2.14]: docs/06-delivery/versions/v0.2.14.md
 [0.2.13]: docs/06-delivery/versions/v0.2.13.md

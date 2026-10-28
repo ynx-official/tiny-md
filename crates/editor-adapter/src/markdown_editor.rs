@@ -124,8 +124,12 @@ pub struct MarkdownStyle {
     pub bare: bool,
     /// Reduce display heading padding without changing text or cursor positions.
     pub compact_headings: bool,
-    /// Use half-height single blank separators in formatted mode.
+    /// Scale single blank separators in formatted mode (half a line by default).
     pub compact_blank_lines: bool,
+    /// Body line height as a multiple of its font size; headings/code keep their metrics.
+    pub line_height: Option<f32>,
+    /// Single paragraph separator height in body lines (when compact_blank_lines is enabled).
+    pub paragraph_spacing: Option<f32>,
     pub bg: Option<Hsla>,
     pub text: Option<Hsla>,
     pub caret: Option<Hsla>,
@@ -172,6 +176,8 @@ struct LayoutStyle {
     wrap: f32,
     compact: bool,
     compact_blank_lines: bool,
+    line_height: f32,
+    paragraph_spacing: f32,
     colors: Vec<Hsla>,
 }
 
@@ -752,6 +758,11 @@ impl MarkdownEditor {
     pub fn tab_size(mut self, n: usize) -> Self {
         self.model.set_tab_size(n);
         self
+    }
+
+    /// Outer column width needed to give text the requested usable width.
+    pub fn container_width(text_width: f32) -> f32 {
+        text_width + PAD_X * 2.0
     }
 
     /// Per-editor visual overrides (see [`MarkdownStyle`]).
@@ -1897,7 +1908,17 @@ impl MarkdownEditor {
                 .unwrap_or(base * 0.55)
         };
         self.cell_w = cell_w;
-        let base_line_h = (base * 1.6).round();
+        let prose_line_height = style
+            .line_height
+            .filter(|value| value.is_finite())
+            .unwrap_or(1.6)
+            .clamp(1.2, 2.4);
+        let paragraph_spacing = style
+            .paragraph_spacing
+            .filter(|value| value.is_finite())
+            .unwrap_or(0.5)
+            .clamp(0.25, 2.0);
+        let base_line_h = (base * prose_line_height).round();
 
         let cursor = self.model.cursor();
         let selection = self.model.selection();
@@ -2340,6 +2361,8 @@ impl MarkdownEditor {
             wrap: wrap_total,
             compact: style.compact_headings,
             compact_blank_lines: style.compact_blank_lines,
+            line_height: prose_line_height,
+            paragraph_spacing,
             colors: [
                 vec![
                     text_color,
@@ -2503,12 +2526,20 @@ impl MarkdownEditor {
                 RowKind::Heading(3) => 1.35,
                 _ => m.scale,
             };
-            let lh = m.line_height;
+            let lh = match plan.kind {
+                RowKind::Paragraph
+                | RowKind::Bullet { .. }
+                | RowKind::Ordered { .. }
+                | RowKind::Task { .. }
+                | RowKind::Quote { .. }
+                | RowKind::Blank => prose_line_height,
+                _ => m.line_height,
+            };
             let (pt, pb) = row_padding(&plan.kind, style.compact_headings);
             let size = (base * scale).round();
             let line_h = (size * lh).round();
             let line_h = if compact_blank {
-                (line_h * 0.5).round()
+                (line_h * paragraph_spacing).round()
             } else {
                 line_h
             };

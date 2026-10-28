@@ -14,7 +14,7 @@ concurrency:
 
 env:
   # User-authorized test skips for these releases only; later tags run tests.
-  RELEASE_SKIP_TESTS: ${{ contains(fromJSON('["v0.2.13", "v0.2.14", "v0.2.15"]'), github.ref_name) && 'true' || 'false' }}
+  RELEASE_SKIP_TESTS: ${{ contains(fromJSON('["v0.2.13", "v0.2.14", "v0.2.15", "v0.2.16"]'), github.ref_name) && 'true' || 'false' }}
   CARGO_TERM_COLOR: always
   CARGO_BUILD_JOBS: 2
   CARGO_PROFILE_DEV_DEBUG: 0

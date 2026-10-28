@@ -3,6 +3,99 @@ use gpui::TestAppContext;
 use gpui::{EntityInputHandler, ScrollDelta, ScrollWheelEvent, size};
 
 #[gpui::test]
+fn typography_spacing_relayouts_cached_rows_and_preserves_source_ime_undo(cx: &mut TestAppContext) {
+    cx.update(|cx| guise::Theme::light().init(cx));
+    let source = "第一段\n\n第二段\n\n\n末段\n\n```text\ncode\n```";
+    let style = MarkdownStyle {
+        bare: true,
+        compact_blank_lines: true,
+        ..Default::default()
+    };
+    let (editor, cx) = cx.add_window_view(|window, cx| {
+        let editor = MarkdownEditor::new(cx)
+            .value(source)
+            .font_size(16.0)
+            .style(style);
+        window.focus(&editor.focus);
+        window.activate_window();
+        editor
+    });
+    draw(cx);
+    draw(cx);
+    editor.update(cx, |editor, cx| {
+        editor.set_style(
+            MarkdownStyle {
+                line_height: Some(2.0),
+                paragraph_spacing: Some(0.75),
+                ..style
+            },
+            cx,
+        )
+    });
+    draw(cx);
+    draw(cx);
+    let position = cx.read(|cx| {
+        let editor = editor.read(cx);
+        assert_eq!(editor.layout[0].height, 32.0);
+        assert_eq!(editor.layout[1].height, 24.0);
+        assert_eq!(editor.layout[2].y.get(), 56.0);
+        assert_eq!(
+            editor.layout[3].height, 32.0,
+            "explicit blank runs keep a full line"
+        );
+        assert_eq!(
+            editor.layout[8].line_h, 22.0,
+            "code keeps its dedicated line height"
+        );
+        assert_eq!(editor.text(), source);
+        editor.text_bounds.origin + point(px(2.0), px(44.0))
+    });
+    cx.simulate_click(position, gpui::Modifiers::none());
+    draw(cx);
+    cx.update(|window, app| {
+        editor.update(app, |editor, cx| {
+            assert_eq!(editor.model.cursor(), Pos::new(1, 0));
+            editor.replace_and_mark_text_in_range(None, "pinyin", Some(6..6), window, cx);
+            editor.set_style(
+                MarkdownStyle {
+                    line_height: Some(1.8),
+                    paragraph_spacing: Some(1.0),
+                    ..style
+                },
+                cx,
+            );
+            assert!(editor.is_composing());
+        })
+    });
+    draw(cx);
+    cx.update(|window, app| {
+        editor.update(app, |editor, cx| {
+            assert_painted_caret_at_cursor(editor, window, cx);
+            editor.replace_text_in_range(None, "中文🌱", window, cx);
+        })
+    });
+    draw(cx);
+    editor.update(cx, |editor, cx| editor.history(false, cx));
+    draw(cx);
+    cx.read(|cx| {
+        assert_eq!(editor.read(cx).text(), source);
+        assert_eq!(editor.read(cx).layout[1].height, 29.0);
+    });
+    editor.update(cx, |editor, cx| editor.set_source_mode(true, cx));
+    draw(cx);
+    cx.read(|cx| assert!(editor.read(cx).layout.iter().all(|row| row.line_h == 22.0)));
+    editor.update(cx, |editor, cx| {
+        editor.set_source_mode(false, cx);
+        editor.set_style(style, cx);
+    });
+    draw(cx);
+    cx.read(|cx| {
+        assert_eq!(editor.read(cx).layout[1].height, 13.0);
+        assert_eq!(editor.read(cx).text(), source);
+    });
+}
+
+#[gpui::test]
 fn table_toolbar_tracks_cursor_without_changing_document_or_row_positions(cx: &mut TestAppContext) {
     cx.update(|cx| guise::Theme::light().init(cx));
     let source = "正文\n\n| 标题 | 内容 |\n| --- | --- |\n| 中文 | 内容 |\n\n后文";

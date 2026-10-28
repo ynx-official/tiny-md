@@ -1,3 +1,4 @@
+use crate::typography::{Typography, TypographyControls};
 use anyhow::{Context as _, Result};
 use gpui::{prelude::*, *};
 use gpui_component::{
@@ -42,9 +43,10 @@ impl ThemePreference {
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
-#[serde(from = "StoredSettings")]
+#[serde(try_from = "StoredSettings")]
 struct AppSettings {
     theme: ThemePreference,
+    typography: Typography,
 }
 
 #[derive(Default, Deserialize)]
@@ -52,19 +54,24 @@ struct AppSettings {
 struct StoredSettings {
     theme: Option<ThemePreference>,
     dark: Option<bool>,
+    typography: Typography,
 }
 
-impl From<StoredSettings> for AppSettings {
-    fn from(stored: StoredSettings) -> Self {
+impl TryFrom<StoredSettings> for AppSettings {
+    type Error = anyhow::Error;
+
+    fn try_from(stored: StoredSettings) -> Result<Self> {
+        stored.typography.validate()?;
         // The old bool was only written after a manual choice. Retain it,
         // while missing settings follow the computer without writing a file.
-        Self {
+        Ok(Self {
             theme: stored.theme.unwrap_or(match stored.dark {
                 Some(true) => ThemePreference::Dark,
                 Some(false) => ThemePreference::Light,
                 None => ThemePreference::System,
             }),
-        }
+            typography: stored.typography,
+        })
     }
 }
 
@@ -133,7 +140,10 @@ fn save_theme_preference(theme: ThemePreference, cx: &mut App) -> Result<()> {
         return Ok(());
     }
     let state = cx.global_mut::<PreferencesState>();
-    let candidate = AppSettings { theme };
+    let candidate = AppSettings {
+        theme,
+        ..state.settings.clone()
+    };
     candidate.save(state.path.as_ref().context("无法找到配置目录")?)?;
     state.settings = candidate;
     state.error.clear();
@@ -143,6 +153,49 @@ fn save_theme_preference(theme: ThemePreference, cx: &mut App) -> Result<()> {
 pub(super) fn theme_preference(cx: &App) -> ThemePreference {
     cx.try_global::<PreferencesState>()
         .map_or(ThemePreference::System, |state| state.settings.theme)
+}
+
+pub(super) fn typography(cx: &App) -> Typography {
+    cx.try_global::<PreferencesState>()
+        .map_or_else(Typography::default, |state| {
+            state.settings.typography.clone()
+        })
+}
+
+pub(super) fn set_typography(typography: Typography, cx: &mut App) -> Result<()> {
+    typography.validate()?;
+    let state = cx.global_mut::<PreferencesState>();
+    let candidate = AppSettings {
+        typography: typography.clone(),
+        ..state.settings.clone()
+    };
+    candidate.save(state.path.as_ref().context("无法找到配置目录")?)?;
+    state.settings = candidate;
+    state.error.clear();
+    let views = cx
+        .try_global::<crate::Session>()
+        .map(|session| {
+            session
+                .windows
+                .iter()
+                .map(|(_, view)| view.clone())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    cx.defer(move |cx| {
+        for view in views {
+            let _ = view.update(cx, |view, cx| {
+                view.font_size = typography.font_size as f32;
+                view.editor.update(cx, |editor, cx| {
+                    editor.set_style(typography.editor_style(view.dark), cx);
+                    editor.set_font_size(view.font_size, cx);
+                });
+                cx.notify();
+            });
+        }
+    });
+    cx.refresh_windows();
+    Ok(())
 }
 
 pub(super) fn set_theme(theme: ThemePreference, window: &mut Window, cx: &mut App) -> Result<()> {
@@ -177,6 +230,7 @@ fn sync_appearance(appearance: WindowAppearance, window: &mut Window, cx: &mut A
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Category {
     Appearance,
+    Typography,
     Updates,
 }
 
@@ -244,6 +298,7 @@ struct PreferencesView {
     theme: Entity<SelectState<Vec<&'static str>>>,
     update_mode: Entity<SelectState<Vec<&'static str>>>,
     interval: Entity<InputState>,
+    typography: Entity<TypographyControls>,
     notice: String,
     _subscriptions: Vec<Subscription>,
 }
@@ -342,6 +397,7 @@ impl PreferencesView {
             theme,
             update_mode,
             interval,
+            typography: cx.new(|cx| TypographyControls::new(window, cx)),
             notice: String::new(),
             _subscriptions: subscriptions,
         }
@@ -400,6 +456,7 @@ impl Render for PreferencesView {
             .gap_2();
         for (id, label, category) in [
             ("prefs-appearance", "外观", Category::Appearance),
+            ("prefs-typography", "正文排版", Category::Typography),
             ("prefs-updates", "更新", Category::Updates),
         ] {
             sidebar = sidebar.child(
@@ -424,6 +481,7 @@ impl Render for PreferencesView {
         }
         let heading = match self.category {
             Category::Appearance => "外观",
+            Category::Typography => "正文排版",
             Category::Updates => "更新",
         };
         let row = |label: &'static str, control: AnyElement| {
@@ -458,6 +516,7 @@ impl Render for PreferencesView {
                     .child(heading),
             );
         content = match self.category {
+            Category::Typography => content.child(self.typography.clone()),
             Category::Appearance => content
                 .child(row(
                     "夜间模式",
@@ -596,6 +655,127 @@ mod tests {
     use core::prelude::v1::test;
 
     #[test]
+    fn typography_preferences_survive_restart_and_theme_changes() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("preferences.json");
+        let typography = serde_json::json!({
+            "content_width": 1140,
+            "font_family": "Microsoft YaHei",
+            "font_size": 18,
+            "line_height": 1.8,
+            "paragraph_spacing": 0.75
+        });
+        let settings: AppSettings = serde_json::from_value(serde_json::json!({
+            "theme": "dark", "typography": typography
+        }))
+        .unwrap();
+        settings.save(&path).unwrap();
+        let saved = serde_json::to_value(AppSettings::load(&path).unwrap()).unwrap();
+        assert_eq!(saved["typography"], typography);
+    }
+
+    #[test]
+    fn typography_rejects_out_of_range_saved_values() {
+        for (field, value) in [
+            ("content_width", serde_json::json!(0)),
+            ("content_width", serde_json::json!(2001)),
+            ("font_size", serde_json::json!(31)),
+            ("line_height", serde_json::json!(0.0)),
+            ("paragraph_spacing", serde_json::json!(-1.0)),
+            ("font_family", serde_json::json!("bad\nfont")),
+        ] {
+            let mut typography = serde_json::Map::new();
+            typography.insert(field.into(), value);
+            assert!(
+                serde_json::from_value::<AppSettings>(serde_json::json!({
+                    "typography": typography
+                }))
+                .is_err(),
+                "invalid {field} accepted"
+            );
+        }
+    }
+
+    #[gpui::test]
+    fn typography_category_is_available_from_preferences(cx: &mut TestAppContext) {
+        let root = tempfile::tempdir().unwrap();
+        setup(cx, root.path());
+        let (_, cx) =
+            cx.add_window_view(|window, cx| PreferencesView::new(Category::Appearance, window, cx));
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.draw(cx).clear();
+        });
+        assert!(
+            cx.debug_bounds("prefs-typography").is_some(),
+            "正文排版入口应出现在偏好设置分类中"
+        );
+    }
+
+    #[gpui::test]
+    fn typography_new_documents_and_zoom_reset_use_saved_size(cx: &mut TestAppContext) {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("preferences.json");
+        std::fs::write(&path, r#"{"typography":{"font_size":18}}"#).unwrap();
+        setup(cx, root.path());
+        let (view, cx) = cx.add_window_view(|window, cx| crate::TinyMd::new(None, window, cx));
+        cx.update(|_, cx| {
+            view.update(cx, |view, cx| {
+                assert_eq!(view.font_size, 18.0);
+                view.zoom(2.0, cx);
+                assert_eq!(view.font_size, 20.0);
+                view.zoom(0.0, cx);
+                assert_eq!(view.font_size, 18.0);
+                assert!(!view.dirty);
+            })
+        });
+    }
+
+    #[gpui::test]
+    fn typography_applies_to_open_windows_preserves_theme_and_failed_save(cx: &mut TestAppContext) {
+        let root = tempfile::tempdir().unwrap();
+        setup(cx, root.path());
+        cx.update(|cx| {
+            crate::open_editor_window(None, true, cx);
+            crate::open_editor_window(None, true, cx);
+        });
+        cx.run_until_parked();
+        let custom = Typography {
+            content_width: 1140,
+            font_size: 18,
+            line_height: 2.0,
+            paragraph_spacing: 0.75,
+            ..Default::default()
+        };
+        cx.update(|cx| {
+            save_theme_preference(ThemePreference::Dark, cx).unwrap();
+            set_typography(custom.clone(), cx).unwrap();
+        });
+        cx.run_until_parked();
+        cx.read(|cx| {
+            assert_eq!(cx.global::<crate::Session>().windows.len(), 2);
+            for (_, view) in &cx.global::<crate::Session>().windows {
+                let view = view.upgrade().unwrap();
+                assert_eq!(view.read(cx).font_size, 18.0);
+                assert!(!view.read(cx).dirty);
+                assert_eq!(view.read(cx).editor.read(cx).text(), "");
+            }
+        });
+        cx.update(|cx| save_theme_preference(ThemePreference::Light, cx).unwrap());
+        let saved = AppSettings::load(&root.path().join("preferences.json")).unwrap();
+        assert_eq!(saved.typography, custom);
+        assert_eq!(saved.theme, ThemePreference::Light);
+        cx.update(|cx| {
+            let invalid = root.path().join("directory");
+            std::fs::create_dir(&invalid).unwrap();
+            cx.global_mut::<PreferencesState>().path = Some(invalid);
+            assert!(set_typography(Typography::default(), cx).is_err());
+            assert_eq!(typography(cx), custom);
+            assert_eq!(theme_preference(cx), ThemePreference::Light);
+        });
+    }
+
+    #[test]
     fn appearance_preference_survives_restart_and_missing_files_keep_defaults() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("中文 app's $() & folder/preferences.json");
@@ -609,7 +789,12 @@ mod tests {
             ThemePreference::Light,
             ThemePreference::System,
         ] {
-            AppSettings { theme }.save(&path).unwrap();
+            AppSettings {
+                theme,
+                ..Default::default()
+            }
+            .save(&path)
+            .unwrap();
             assert_eq!(AppSettings::load(&path).unwrap().theme, theme);
         }
     }
@@ -929,7 +1114,11 @@ mod tests {
         let (view, cx) =
             cx.add_window_view(|window, cx| PreferencesView::new(Category::Appearance, window, cx));
         for dark in [false, true] {
-            for category in [Category::Appearance, Category::Updates] {
+            for category in [
+                Category::Appearance,
+                Category::Typography,
+                Category::Updates,
+            ] {
                 cx.update(|window, cx| {
                     crate::apply_theme(dark, window, cx);
                     view.update(cx, |view, _| view.category = category);
@@ -948,6 +1137,26 @@ mod tests {
                 assert!(done.origin.y >= px(0.0) && done.bottom() <= px(430.0));
                 let category = cx.debug_bounds("prefs-updates").unwrap();
                 assert!(category.origin.x >= px(0.0) && category.right() <= px(640.0));
+                if cx.read(|cx| view.read(cx).category == Category::Typography) {
+                    let viewport = cx.debug_bounds("preferences-content").unwrap();
+                    let font = cx.debug_bounds("typography-font").unwrap();
+                    assert!(font.left() >= viewport.left() && font.right() <= viewport.right());
+                    cx.simulate_mouse_move(viewport.center(), None, Modifiers::none());
+                    cx.simulate_event(ScrollWheelEvent {
+                        position: viewport.center(),
+                        delta: ScrollDelta::Pixels(point(px(0.0), px(-1000.0))),
+                        ..Default::default()
+                    });
+                    cx.run_until_parked();
+                    cx.update(|window, cx| {
+                        window.draw(cx).clear();
+                    });
+                    let save = cx.debug_bounds("typography-save").unwrap();
+                    assert!(
+                        save.top() >= viewport.top() && save.bottom() <= viewport.bottom(),
+                        "save remains reachable by scrolling at minimum size"
+                    );
+                }
             }
         }
     }
