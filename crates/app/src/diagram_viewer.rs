@@ -74,6 +74,7 @@ struct DiagramViewer {
 
 impl DiagramViewer {
     fn new(diagram: Diagram, dark: bool, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        crate::preferences::observe_appearance(window, cx);
         let image = cx.new(|cx| DiagramImage::high_definition(diagram.clone(), cx));
         let close_image = image.downgrade();
         window.on_window_should_close(cx, move |window, cx| {

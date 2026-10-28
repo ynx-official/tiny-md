@@ -28,6 +28,7 @@ actions!(
         ToggleTheme,
         LightTheme,
         DarkTheme,
+        SystemTheme,
         ToggleSidebar,
         ShowDocuments,
         ShowOutline,
@@ -111,6 +112,7 @@ actions!(
 pub struct MenuState {
     pub source: bool,
     pub dark: bool,
+    pub system_theme: bool,
     pub sidebar: bool,
     pub outline: bool,
     pub tree: bool,
@@ -334,8 +336,15 @@ fn build(state: MenuState, recent: &[std::path::PathBuf], mac: bool) -> Vec<Menu
         Menu {
             name: "主题".into(),
             items: vec![
-                MenuItem::action(checked("浅色", !state.dark), LightTheme),
-                MenuItem::action(checked("深色", state.dark), DarkTheme),
+                MenuItem::action(
+                    checked("黑夜", !state.system_theme && state.dark),
+                    DarkTheme,
+                ),
+                MenuItem::action(
+                    checked("白天", !state.system_theme && !state.dark),
+                    LightTheme,
+                ),
+                MenuItem::action(checked("跟随电脑", state.system_theme), SystemTheme),
             ],
         },
         Menu {
@@ -494,6 +503,7 @@ pub fn register_forwarding(cx: &mut App) {
         ToggleTheme,
         LightTheme,
         DarkTheme,
+        SystemTheme,
         ToggleSidebar,
         ShowDocuments,
         ShowOutline,
@@ -576,6 +586,44 @@ pub fn register_forwarding(cx: &mut App) {
 mod tests {
     use super::*;
     use core::prelude::v1::test;
+
+    #[test]
+    fn night_mode_menu_checks_the_saved_mode_on_both_platforms() {
+        for mac in [false, true] {
+            for (system_theme, dark, expected) in [
+                (true, true, "✓ 跟随电脑"),
+                (true, false, "✓ 跟随电脑"),
+                (false, true, "✓ 黑夜"),
+                (false, false, "✓ 白天"),
+            ] {
+                let menus = build(
+                    MenuState {
+                        system_theme,
+                        dark,
+                        ..Default::default()
+                    },
+                    &[],
+                    mac,
+                );
+                let menu = menus
+                    .iter()
+                    .find(|menu| menu.name.starts_with("主题"))
+                    .unwrap();
+                let selected = menu
+                    .items
+                    .iter()
+                    .filter_map(|item| match item {
+                        MenuItem::Action { name, .. } if name.starts_with("✓ ") => {
+                            Some(name.as_ref())
+                        }
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(selected, [expected]);
+                assert_eq!(menu.items.len(), 3);
+            }
+        }
+    }
 
     #[test]
     fn windows_menu_access_keys_match_visible_hints_and_do_not_affect_mac_option_keys() {

@@ -7,7 +7,7 @@
 | 文档 | 内容 |
 |---|---|
 | [UI 风格](02-design/ui-style.md) | 已确认的 notion 风格、原生应用适配、侧栏虚线调宽与正文 / 侧栏滚动条 |
-| [偏好设置与更新窗口](02-design/preferences.md) | 文件菜单入口、分类设置、主题持久化、后台下载和更新窗口重新排版 |
+| [偏好设置与更新窗口](02-design/preferences.md) | 文件菜单入口、三档夜间模式与系统主题跟随、设置持久化、后台下载和更新窗口重新排版 |
 | [应用图标](02-design/application-icons.md) | Windows 留白与 DPI 尺寸、macOS 独立素材、导出及资源核对 |
 | [外部文件同步](02-design/external-file-sync.md) | 自动同步、三方合并、冲突处理与撤销保护 |
 | [文档窗口](02-design/document-windows.md) | 侧栏定位当前文档、默认目录折叠、当前窗口切换、空白未命名窗口复用与草稿保护 |
@@ -22,7 +22,7 @@
 | [验证记录](verification.md) | 自动检查、原生交互和输入法验收证据 |
 | [输入光标同步](04-quality/input-caret-synchronization.md) | 快速输入、换行与自动滚动的光标坐标修复及组合输入回归 |
 | [Markdown 交互](04-quality/markdown-interactions.md) | 复选框原位勾选、链接手形光标、表格与换行链接、只读与源码模式边界 |
-| [Markdown 表格快捷操作](04-quality/markdown-table-controls.md) | 表格工具栏、尺寸网格与数字输入、缩小确认、更多菜单、键盘导航、源码与撤销保护及双平台验证边界 |
+| [Markdown 表格快捷操作](04-quality/markdown-table-controls.md) | 表格斑马纹、工具栏、尺寸网格与数字输入、缩小确认、更多菜单、键盘导航、源码与撤销保护及双平台验证边界 |
 | [图片内嵌预览](04-quality/inline-images.md) | 本地相对路径与 HTTP/HTTPS、后台加载、编辑 / 源码切换、资源回收与跨平台验证边界 |
 | [SVG 字体内存优化](04-quality/svg-font-memory.md) | 按需字体读取、紧凑的流程图字体缓存、像素一致性及原生进程内存对照 |
 | [HTML 混排兼容](04-quality/html-compatibility.md) | HTML 标题、换行与注释标记、徽章横排与链接、折叠与 HTML 表格、源码保存及中文输入 / 撤销回归 |

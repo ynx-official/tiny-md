@@ -11,10 +11,61 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use tiny_md_updater::CheckMode;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum ThemePreference {
+    Dark,
+    Light,
+    #[default]
+    System,
+}
+
+impl ThemePreference {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Dark => "黑夜",
+            Self::Light => "白天",
+            Self::System => "跟随电脑",
+        }
+    }
+
+    pub(super) fn is_dark(self, appearance: WindowAppearance) -> bool {
+        match self {
+            Self::Dark => true,
+            Self::Light => false,
+            Self::System => matches!(
+                appearance,
+                WindowAppearance::Dark | WindowAppearance::VibrantDark
+            ),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
-#[serde(default)]
+#[serde(from = "StoredSettings")]
 struct AppSettings {
-    dark: bool,
+    theme: ThemePreference,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct StoredSettings {
+    theme: Option<ThemePreference>,
+    dark: Option<bool>,
+}
+
+impl From<StoredSettings> for AppSettings {
+    fn from(stored: StoredSettings) -> Self {
+        // The old bool was only written after a manual choice. Retain it,
+        // while missing settings follow the computer without writing a file.
+        Self {
+            theme: stored.theme.unwrap_or(match stored.dark {
+                Some(true) => ThemePreference::Dark,
+                Some(false) => ThemePreference::Light,
+                None => ThemePreference::System,
+            }),
+        }
+    }
 }
 
 impl AppSettings {
@@ -65,7 +116,7 @@ pub(super) fn init_at(path: Option<PathBuf>, cx: &mut App) -> bool {
             format!("无法读取偏好设置：{error:#}"),
         ),
     };
-    let dark = settings.dark;
+    let dark = settings.theme.is_dark(cx.window_appearance());
     cx.set_global(PreferencesState {
         settings,
         path,
@@ -76,17 +127,51 @@ pub(super) fn init_at(path: Option<PathBuf>, cx: &mut App) -> bool {
     dark
 }
 
-pub(super) fn save_theme(dark: bool, cx: &mut App) -> Result<()> {
+fn save_theme_preference(theme: ThemePreference, cx: &mut App) -> Result<()> {
     // Isolated document tests do not initialize the application settings store.
     if !cx.has_global::<PreferencesState>() {
         return Ok(());
     }
     let state = cx.global_mut::<PreferencesState>();
-    let candidate = AppSettings { dark };
+    let candidate = AppSettings { theme };
     candidate.save(state.path.as_ref().context("无法找到配置目录")?)?;
     state.settings = candidate;
     state.error.clear();
     Ok(())
+}
+
+pub(super) fn theme_preference(cx: &App) -> ThemePreference {
+    cx.try_global::<PreferencesState>()
+        .map_or(ThemePreference::System, |state| state.settings.theme)
+}
+
+pub(super) fn set_theme(theme: ThemePreference, window: &mut Window, cx: &mut App) -> Result<()> {
+    save_theme_preference(theme, cx)?;
+    crate::apply_theme(theme.is_dark(window.appearance()), window, cx);
+    Ok(())
+}
+
+pub(super) fn observe_appearance(window: &mut Window, cx: &mut App) {
+    // The app can outlive its last window on macOS, so it may have missed an
+    // OS notification. Resolve the new window's appearance before rendering.
+    sync_appearance(window.appearance(), window, cx);
+    window
+        .observe_window_appearance(|window, cx| {
+            sync_appearance(window.appearance(), window, cx);
+        })
+        .detach();
+}
+
+fn sync_appearance(appearance: WindowAppearance, window: &mut Window, cx: &mut App) {
+    if !cx.has_global::<PreferencesState>() || !cx.has_global::<crate::Session>() {
+        return;
+    }
+    let mode = theme_preference(cx);
+    let dark = mode.is_dark(appearance);
+    if mode == ThemePreference::System && cx.global::<crate::Session>().dark != dark {
+        // OS notifications change the effective palette, not the saved choice.
+        crate::apply_theme(dark, window, cx);
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -164,12 +249,21 @@ struct PreferencesView {
 }
 impl PreferencesView {
     fn new(category: Category, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        observe_appearance(window, cx);
         let prefs = crate::updates::preferences(cx);
-        let dark = cx.global::<crate::Session>().dark;
+        let mode = theme_preference(cx);
+        let modes = [
+            ThemePreference::Dark,
+            ThemePreference::Light,
+            ThemePreference::System,
+        ];
         let theme = cx.new(|cx| {
             SelectState::new(
-                vec!["浅色", "深色"],
-                Some(gpui_component::IndexPath::default().row(usize::from(dark))),
+                modes.map(ThemePreference::label).to_vec(),
+                Some(
+                    gpui_component::IndexPath::default()
+                        .row(modes.iter().position(|item| *item == mode).unwrap()),
+                ),
                 window,
                 cx,
             )
@@ -197,10 +291,15 @@ impl PreferencesView {
                 window,
                 |this, _, event: &SelectEvent<Vec<&'static str>>, window, cx| {
                     if let SelectEvent::Confirm(Some(value)) = event {
-                        match save_theme(*value == "深色", cx) {
+                        let mode = match *value {
+                            "黑夜" => ThemePreference::Dark,
+                            "白天" => ThemePreference::Light,
+                            "跟随电脑" => ThemePreference::System,
+                            _ => return,
+                        };
+                        match set_theme(mode, window, cx) {
                             Ok(()) => {
                                 this.notice.clear();
-                                crate::apply_theme(*value == "深色", window, cx);
                             }
                             Err(error) => this.notice = format!("主题设置保存失败：{error:#}"),
                         }
@@ -274,7 +373,7 @@ impl Render for PreferencesView {
         let ink = rgb(if dark { 0xe4e6e9 } else { 0x37352f });
         let muted = rgb(if dark { 0xb2b7bf } else { 0x787671 });
         let border = rgb(if dark { 0x34383f } else { 0xe5e3df });
-        let theme_label = if dark { "深色" } else { "浅色" };
+        let theme_label = theme_preference(cx).label();
         if self.theme.read(cx).selected_value() != Some(&theme_label) {
             self.theme.update(cx, |select, cx| {
                 select.set_selected_value(&theme_label, window, cx)
@@ -361,13 +460,17 @@ impl Render for PreferencesView {
         content = match self.category {
             Category::Appearance => content
                 .child(row(
-                    "界面主题",
-                    Select::new(&self.theme).w(px(240.0)).into_any_element(),
+                    "夜间模式",
+                    div()
+                        .id("prefs-night-mode")
+                        .debug_selector(|| "prefs-night-mode".into())
+                        .child(Select::new(&self.theme).w(px(240.0)))
+                        .into_any_element(),
                 ))
                 .child(
                     div()
                         .text_color(muted)
-                        .child("应用于所有窗口，下次启动保留所选主题。"),
+                        .child("应用于所有窗口并记住所选模式；跟随电脑时自动切换黑夜与白天。"),
                 ),
             Category::Updates => content
                 .child(row(
@@ -496,9 +599,19 @@ mod tests {
     fn appearance_preference_survives_restart_and_missing_files_keep_defaults() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("中文 app's $() & folder/preferences.json");
-        assert!(!AppSettings::load(&path).unwrap().dark);
-        AppSettings { dark: true }.save(&path).unwrap();
-        assert!(AppSettings::load(&path).unwrap().dark);
+        assert_eq!(
+            AppSettings::load(&path).unwrap().theme,
+            ThemePreference::System
+        );
+        assert!(!path.exists());
+        for theme in [
+            ThemePreference::Dark,
+            ThemePreference::Light,
+            ThemePreference::System,
+        ] {
+            AppSettings { theme }.save(&path).unwrap();
+            assert_eq!(AppSettings::load(&path).unwrap().theme, theme);
+        }
     }
 
     #[test]
@@ -508,6 +621,39 @@ mod tests {
         std::fs::write(&path, b"invalid preferences").unwrap();
         assert!(AppSettings::load(&path).is_err());
         assert_eq!(std::fs::read(&path).unwrap(), b"invalid preferences");
+    }
+
+    #[test]
+    fn night_mode_migrates_explicit_legacy_choices_and_resolves_system_appearance() {
+        for (json, expected) in [
+            (r#"{}"#, ThemePreference::System),
+            (r#"{"dark":true}"#, ThemePreference::Dark),
+            (r#"{"dark":false}"#, ThemePreference::Light),
+            (r#"{"theme":"system","dark":true}"#, ThemePreference::System),
+        ] {
+            let settings: AppSettings = serde_json::from_str(json).unwrap();
+            assert_eq!(settings.theme, expected);
+            let saved = serde_json::to_value(settings).unwrap();
+            assert!(saved.get("theme").is_some());
+            assert!(saved.get("dark").is_none());
+        }
+        assert!(serde_json::from_str::<AppSettings>(r#"{"theme":"unknown"}"#).is_err());
+        for appearance in [
+            WindowAppearance::Light,
+            WindowAppearance::VibrantLight,
+            WindowAppearance::Dark,
+            WindowAppearance::VibrantDark,
+        ] {
+            assert!(ThemePreference::Dark.is_dark(appearance));
+            assert!(!ThemePreference::Light.is_dark(appearance));
+            assert_eq!(
+                ThemePreference::System.is_dark(appearance),
+                matches!(
+                    appearance,
+                    WindowAppearance::Dark | WindowAppearance::VibrantDark
+                )
+            );
+        }
     }
 
     #[test]
@@ -527,6 +673,127 @@ mod tests {
             init_at(Some(root.join("preferences.json")), cx);
             crate::updates::init_at(Some(root.join("update-settings.json")), cx);
         });
+    }
+
+    #[gpui::test]
+    fn night_mode_defaults_to_following_computer(cx: &mut TestAppContext) {
+        let root = tempfile::tempdir().unwrap();
+        setup(cx, root.path());
+        let (view, cx) =
+            cx.add_window_view(|window, cx| PreferencesView::new(Category::Appearance, window, cx));
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.draw(cx).clear();
+        });
+        cx.read(|cx| {
+            assert_eq!(
+                view.read(cx).theme.read(cx).selected_value(),
+                Some(&"跟随电脑")
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn night_mode_new_window_resolves_current_system_appearance(cx: &mut TestAppContext) {
+        let root = tempfile::tempdir().unwrap();
+        setup(cx, root.path());
+        cx.update(|cx| cx.global_mut::<crate::Session>().dark = true);
+        let (view, cx) = cx.add_window_view(|window, cx| crate::TinyMd::new(None, window, cx));
+        cx.update(|window, cx| {
+            let expected = ThemePreference::System.is_dark(window.appearance());
+            assert_eq!(view.read(cx).dark, expected);
+            assert_eq!(cx.global::<crate::Session>().dark, expected);
+        });
+        assert!(!root.path().join("preferences.json").exists());
+    }
+
+    #[gpui::test]
+    fn night_mode_controls_persist_all_choices_and_system_events_keep_the_preference(
+        cx: &mut TestAppContext,
+    ) {
+        let root = tempfile::tempdir().unwrap();
+        setup(cx, root.path());
+        cx.update(|cx| crate::open_editor_window(None, true, cx));
+        let (prefs, cx) =
+            cx.add_window_view(|window, cx| PreferencesView::new(Category::Appearance, window, cx));
+        cx.run_until_parked();
+        for (label, mode) in [
+            ("黑夜", ThemePreference::Dark),
+            ("白天", ThemePreference::Light),
+            ("跟随电脑", ThemePreference::System),
+        ] {
+            prefs.update(cx, |prefs, cx| {
+                prefs.theme.update(cx, |_, cx| {
+                    cx.emit(SelectEvent::<Vec<&'static str>>::Confirm(Some(label)));
+                })
+            });
+            cx.run_until_parked();
+            assert_eq!(
+                AppSettings::load(&root.path().join("preferences.json"))
+                    .unwrap()
+                    .theme,
+                mode
+            );
+            for appearance in [WindowAppearance::Dark, WindowAppearance::Light] {
+                cx.update(|window, cx| sync_appearance(appearance, window, cx));
+                cx.run_until_parked();
+                cx.update(|window, cx| {
+                    window.draw(cx).clear();
+                });
+                cx.read(|cx| {
+                    let expected = mode.is_dark(appearance);
+                    assert_eq!(cx.global::<crate::Session>().dark, expected);
+                    assert_eq!(gpui_component::Theme::global(cx).is_dark(), expected);
+                    assert_eq!(guise::theme::theme(cx).scheme.is_dark(), expected);
+                    for (_, doc) in &cx.global::<crate::Session>().windows {
+                        let doc = doc.upgrade().unwrap();
+                        assert_eq!(doc.read(cx).dark, expected);
+                        assert_eq!(doc.read(cx).editor.read(cx).text(), "");
+                        assert!(!doc.read(cx).dirty);
+                    }
+                    assert_eq!(prefs.read(cx).theme.read(cx).selected_value(), Some(&label));
+                });
+            }
+            assert_eq!(
+                AppSettings::load(&root.path().join("preferences.json"))
+                    .unwrap()
+                    .theme,
+                mode
+            );
+        }
+    }
+
+    #[gpui::test]
+    fn night_mode_manual_choice_overrides_system_even_when_palette_matches_and_failed_save_is_atomic(
+        cx: &mut TestAppContext,
+    ) {
+        let root = tempfile::tempdir().unwrap();
+        setup(cx, root.path());
+        let (view, cx) = cx.add_window_view(|window, cx| crate::TinyMd::new(None, window, cx));
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                view.select_theme(ThemePreference::Light, window, cx);
+            })
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            assert_eq!(theme_preference(cx), ThemePreference::Light);
+            sync_appearance(WindowAppearance::Dark, window, cx);
+            assert!(!cx.global::<crate::Session>().dark);
+            // A directory at the destination reliably fails atomic file replacement.
+            let invalid = root.path().join("directory");
+            std::fs::create_dir(&invalid).unwrap();
+            cx.global_mut::<PreferencesState>().path = Some(invalid);
+            assert!(set_theme(ThemePreference::Dark, window, cx).is_err());
+            assert_eq!(theme_preference(cx), ThemePreference::Light);
+            assert!(!cx.global::<crate::Session>().dark);
+        });
+        assert_eq!(
+            AppSettings::load(&root.path().join("preferences.json"))
+                .unwrap()
+                .theme,
+            ThemePreference::Light
+        );
     }
 
     #[gpui::test]
@@ -632,14 +899,14 @@ mod tests {
             });
         });
         cx.run_until_parked();
-        assert!(
+        assert_eq!(
             AppSettings::load(&root.path().join("preferences.json"))
                 .unwrap()
-                .dark
+                .theme,
+            ThemePreference::Dark
         );
         cx.update(|window, cx| {
-            save_theme(false, cx).unwrap();
-            crate::apply_theme(false, window, cx);
+            set_theme(ThemePreference::Light, window, cx).unwrap();
         });
         cx.run_until_parked();
         cx.read(|cx| {
@@ -647,10 +914,11 @@ mod tests {
             assert!(view.read(cx).dirty);
             assert_eq!(view.read(cx).editor.read(cx).text(), "unsaved draft");
         });
-        assert!(
-            !AppSettings::load(&root.path().join("preferences.json"))
+        assert_eq!(
+            AppSettings::load(&root.path().join("preferences.json"))
                 .unwrap()
-                .dark
+                .theme,
+            ThemePreference::Light
         );
     }
 

@@ -15,6 +15,7 @@
 
 - 光标位于表格单元格，或文本选区完全位于同一张表格内时显示工具栏；跨出表格的选区不提供表格操作。
 - 左上角的左 / 中 / 右对齐作用于当前列，选中状态反映该列的对齐方式。
+- 2026-10-28 用户要求增强 Markdown 表格的斑马纹：数据行从第二行起隔行使用浅灰底色，深色主题使用对应灰阶；按表格内行号交替，不随文档位置或滚动改变。保留独立表头底色，当前编辑行的高亮优先于斑马纹。只改变显示，不修改源码、行高或撤销历史。
 - 右上角为更多菜单与整表删除。删除提示明确说明删除整张表格，可一次撤销。
 - 可编辑表格上方固定保留 26 px 工具区；失焦隐藏按钮时不改变布局，不覆盖上方正文或表头。只读与源码模式不显示工具栏。
 - 菜单含上下插入行、左右插入列、上下移动行、左右移动列、删除行列、复制表格、格式化表格源码和删除表格。
@@ -65,6 +66,9 @@ GPUI 0.2.2 的调试坐标表会保留已移除控件的坐标，因此关闭状
 日志为 `target/table-controls-check.log`。`cargo build --locked -p tiny-md` 成功，日志为 `target/table-controls-build.log`。
 
 尺寸面板补充后再次实际执行 `./scripts/check.ps1` 通过：295 项工作区测试（应用 74、文档 16、编辑器 190、更新器及其集成测试 15）、17 项发布工具测试、版本资料检查、格式检查及 Clippy。两项手工性能测试与一项 doctest 仍按项目原有设置忽略。日志为 `target/table-size-check.log`。
+
+同日斑马纹调整只增强共享渲染层的隔行底色，未改变结构和交互逻辑。实际执行 `cargo test --locked -p tiny-md-editor table_`，30 项相关回归通过（日志 `target/table-stripes-tests.log`）；`cargo fmt --all -- --check` 与 `cargo clippy --locked -p tiny-md-editor --all-targets -- -D warnings` 通过。
+`cargo build --locked -p tiny-md` 成功（日志 `target/table-stripes-build.log`）。本次没有新增 Windows / macOS 原生截图或视觉验收证据。
 
 ## 原生检查
 

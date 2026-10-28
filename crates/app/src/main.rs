@@ -391,6 +391,7 @@ impl TinyMd {
     }
 
     fn new(initial: Option<PathBuf>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        preferences::observe_appearance(window, cx);
         let (document, text, status, error) = match initial {
             Some(path) => match Document::open(&path) {
                 Ok((document, text)) => (document, text, "已打开".into(), false),
@@ -926,8 +927,24 @@ impl TinyMd {
     }
 
     fn toggle_theme(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let dark = !self.dark;
-        if let Err(error) = preferences::save_theme(dark, cx) {
+        self.select_theme(
+            if self.dark {
+                preferences::ThemePreference::Light
+            } else {
+                preferences::ThemePreference::Dark
+            },
+            window,
+            cx,
+        );
+    }
+
+    fn select_theme(
+        &mut self,
+        mode: preferences::ThemePreference,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Err(error) = preferences::set_theme(mode, window, cx) {
             let answer = window.prompt(
                 PromptLevel::Warning,
                 "无法保存主题设置",
@@ -941,10 +958,11 @@ impl TinyMd {
             .detach();
             return;
         }
+        let dark = mode.is_dark(window.appearance());
         self.dark = dark;
         self.editor
             .update(cx, |editor, cx| editor.set_style(editor_style(dark), cx));
-        apply_theme(dark, window, cx);
+        cx.notify();
     }
 
     fn jump(&mut self, line: usize, window: &mut Window, cx: &mut Context<Self>) {
@@ -1119,6 +1137,7 @@ impl Render for TinyMd {
         let menu_state = MenuState {
             source: self.source_mode,
             dark: self.dark,
+            system_theme: preferences::theme_preference(cx) == preferences::ThemePreference::System,
             sidebar: self.sidebar,
             outline: self.sidebar_mode == SidebarMode::Outline,
             tree: self.sidebar_mode == SidebarMode::Tree,
@@ -1514,14 +1533,13 @@ impl Render for TinyMd {
             .on_action(cx.listener(|this, _: &ToggleSource, w, cx| this.toggle_source(w, cx)))
             .on_action(cx.listener(|this, _: &ToggleTheme, w, cx| this.toggle_theme(w, cx)))
             .on_action(cx.listener(|this, _: &LightTheme, w, cx| {
-                if this.dark {
-                    this.toggle_theme(w, cx);
-                }
+                this.select_theme(preferences::ThemePreference::Light, w, cx);
             }))
             .on_action(cx.listener(|this, _: &DarkTheme, w, cx| {
-                if !this.dark {
-                    this.toggle_theme(w, cx);
-                }
+                this.select_theme(preferences::ThemePreference::Dark, w, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SystemTheme, w, cx| {
+                this.select_theme(preferences::ThemePreference::System, w, cx);
             }))
             .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| {
                 this.toggle_sidebar(cx);
@@ -1797,6 +1815,8 @@ fn main() {
                 cx,
                 MenuState {
                     dark,
+                    system_theme: preferences::theme_preference(cx)
+                        == preferences::ThemePreference::System,
                     ..Default::default()
                 },
                 &[],

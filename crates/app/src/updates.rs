@@ -265,6 +265,7 @@ pub(super) fn show(cx: &mut App, check: bool, current_notes: bool) {
             ..Default::default()
         },
         |window, cx| {
+            crate::preferences::observe_appearance(window, cx);
             window.on_window_should_close(cx, |_, _| true);
             cx.new(|cx| Root::new(center, window, cx))
         },

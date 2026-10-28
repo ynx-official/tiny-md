@@ -1879,7 +1879,7 @@ impl MarkdownEditor {
         let quote_text = style.quote_text.unwrap_or(dimmed);
         let radius = t.radius(t.default_radius);
         let token_colors: [Hsla; 8] = TokenKind::ALL.map(|kind| token_color(kind, t));
-        let table_hover_bg = t.surface_hover().alpha(0.15);
+        let table_stripe_bg = t.surface_hover().alpha(if is_dark { 0.55 } else { 0.65 });
         let table_edit_bg = t.primary().alpha(0.06);
 
         let prose = window.text_style().font();
@@ -2957,7 +2957,7 @@ impl MarkdownEditor {
                 if i == table.start {
                     grid = grid.border_t_1().bg(code_bg);
                 } else if (i - table.start) % 2 == 1 {
-                    grid = grid.bg(table_hover_bg);
+                    grid = grid.bg(table_stripe_bg);
                 }
                 if i == cursor.line && focused && !self.read_only {
                     grid = grid.bg(table_edit_bg);
