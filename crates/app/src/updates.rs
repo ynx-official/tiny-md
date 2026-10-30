@@ -125,15 +125,36 @@ pub(super) fn routes_locked(cx: &App) -> bool {
 }
 
 pub(super) fn set_route(mode: RouteMode, custom: &str, cx: &mut App) -> anyhow::Result<()> {
+    change_routes(cx, |candidate| {
+        if mode == RouteMode::Custom {
+            let prefix = tiny_md_updater::routes::normalize_custom(custom)?;
+            anyhow::ensure!(
+                candidate.custom_routes.contains(&prefix),
+                "请先新增并保存该线路"
+            );
+            candidate.custom_route = prefix;
+        }
+        candidate.route_mode = mode;
+        Ok(())
+    })
+}
+
+pub(super) fn add_custom_route(value: &str, cx: &mut App) -> anyhow::Result<()> {
+    change_routes(cx, |candidate| candidate.add_custom_route(value))
+}
+
+pub(super) fn remove_custom_route(value: &str, cx: &mut App) -> anyhow::Result<()> {
+    change_routes(cx, |candidate| candidate.remove_custom_route(value))
+}
+
+fn change_routes(
+    cx: &mut App,
+    change: impl FnOnce(&mut Preferences) -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
     center(cx).update(cx, |this, cx| {
         anyhow::ensure!(!this.phase.blocks_check(), "更新正在进行，请稍后修改线路");
         let mut candidate = this.prefs.clone();
-        candidate.route_mode = mode;
-        candidate.custom_route = if custom.trim().is_empty() {
-            String::new()
-        } else {
-            tiny_md_updater::routes::normalize_custom(custom)?
-        };
+        change(&mut candidate)?;
         tiny_md_updater::routes::configured_routes(&candidate)?;
         candidate.save(
             this.prefs_path
@@ -1315,6 +1336,70 @@ mod preference_tests {
                 Preferences::load(&path).unwrap().route_mode,
                 RouteMode::GhFast
             );
+        });
+    }
+
+    #[gpui::test]
+    fn custom_route_collection_is_atomic_and_removal_invalidates_old_plans(
+        cx: &mut TestAppContext,
+    ) {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("settings.json");
+        cx.update(|cx| {
+            init_at(Some(path.clone()), cx);
+            set_preferences(CheckMode::Interval, 48, cx).unwrap();
+            let center = center(cx);
+            center.update(cx, |this, _| this.prefs.last_checked = 123);
+            add_custom_route(" https://mirror.example/one ", cx).unwrap();
+            add_custom_route("https://mirror.example/two/", cx).unwrap();
+            assert_eq!(preferences(cx).route_mode, RouteMode::Auto);
+            for duplicate in ["https://MIRROR.example:443/one/", "https://ghfast.top"] {
+                assert!(add_custom_route(duplicate, cx).is_err());
+            }
+            assert!(add_custom_route("http://invalid.example/", cx).is_err());
+            assert_eq!(preferences(cx).custom_routes.len(), 2);
+            set_route(RouteMode::Custom, "https://mirror.example/two/", cx).unwrap();
+            remove_custom_route("https://mirror.example/one/", cx).unwrap();
+            assert_eq!(preferences(cx).route_mode, RouteMode::Custom);
+            let before = serde_json::to_value(preferences(cx)).unwrap();
+            let disk = std::fs::read(&path).unwrap();
+            let blocked = root.path().join("blocked");
+            std::fs::write(&blocked, "file").unwrap();
+            center.update(cx, |this, _| {
+                this.prefs_path = Some(blocked.join("settings.json"))
+            });
+            assert!(remove_custom_route("https://mirror.example/two/", cx).is_err());
+            assert!(add_custom_route("https://mirror.example/three/", cx).is_err());
+            assert_eq!(serde_json::to_value(preferences(cx)).unwrap(), before);
+            assert_eq!(std::fs::read(&path).unwrap(), disk);
+            center.update(cx, |this, _| {
+                this.prefs_path = Some(path.clone());
+                this.phase = Phase::Checking;
+            });
+            assert!(remove_custom_route("https://mirror.example/two/", cx).is_err());
+            assert!(add_custom_route("https://mirror.example/three/", cx).is_err());
+            let old_request = center.update(cx, |this, _| {
+                this.phase = Phase::Available(Release {
+                    version: "v9.0.0".into(),
+                    notes: String::new(),
+                    assets: Vec::new(),
+                });
+                this.download_routes =
+                    tiny_md_updater::routes::configured_routes(&this.prefs).unwrap();
+                this.route_request
+            });
+            remove_custom_route("https://mirror.example/two/", cx).unwrap();
+            center.update(cx, |this, _| {
+                assert!(!this.complete_probe(old_request, Ok(ProbeReport::default())));
+                assert!(this.download_routes.is_empty());
+                assert!(matches!(this.phase, Phase::Idle));
+            });
+            let restored = Preferences::load(&path).unwrap();
+            assert_eq!(restored.route_mode, RouteMode::Auto);
+            assert!(restored.custom_routes.is_empty());
+            assert!(restored.custom_route.is_empty());
+            assert_eq!(restored.last_checked, 123);
+            assert_eq!(restored.interval_hours, 48);
         });
     }
 

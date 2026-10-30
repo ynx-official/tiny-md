@@ -12,6 +12,7 @@ use std::{
 
 const LIMIT: u64 = 2 * 1024 * 1024;
 const PROBE_TIMEOUT: Duration = Duration::from_secs(4);
+const MAX_PARALLEL_PROBES: usize = 4;
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -57,10 +58,11 @@ impl Route {
     pub fn label(&self) -> String {
         match self.mode {
             RouteMode::Github => "GitHub 直连".into(),
-            RouteMode::Custom => Url::parse(&self.prefix)
-                .ok()
-                .and_then(|u| u.host_str().map(str::to_owned))
-                .unwrap_or_else(|| "自定义线路".into()),
+            RouteMode::Custom => self
+                .prefix
+                .trim_start_matches("https://")
+                .trim_end_matches('/')
+                .into(),
             mode => mode.label().into(),
         }
     }
@@ -154,14 +156,8 @@ pub fn normalize_custom(value: &str) -> Result<String> {
 }
 
 pub fn configured_routes(prefs: &Preferences) -> Result<Vec<Route>> {
-    let custom = if prefs.custom_route.trim().is_empty() {
-        None
-    } else {
-        Some(Route {
-            mode: RouteMode::Custom,
-            prefix: normalize_custom(&prefs.custom_route)?,
-        })
-    };
+    let mut prefs = prefs.clone();
+    prefs.normalize_routes()?;
     let mut routes = vec![
         Route::github(),
         Route {
@@ -173,11 +169,21 @@ pub fn configured_routes(prefs: &Preferences) -> Result<Vec<Route>> {
             prefix: "https://ghfast.top/".into(),
         },
     ];
-    if let Some(custom) = custom {
-        routes.push(custom);
+    for prefix in &prefs.custom_routes {
+        // Legacy settings could contain a built-in proxy as a custom prefix.
+        // Avoid duplicate requests in auto mode, while preserving fixed selection.
+        if prefs.route_mode == RouteMode::Custom || !routes.iter().any(|r| &r.prefix == prefix) {
+            routes.push(Route {
+                mode: RouteMode::Custom,
+                prefix: prefix.clone(),
+            });
+        }
     }
     if prefs.route_mode != RouteMode::Auto {
-        routes.retain(|r| r.mode == prefs.route_mode);
+        routes.retain(|r| {
+            r.mode == prefs.route_mode
+                && (r.mode != RouteMode::Custom || r.prefix == prefs.custom_route)
+        });
     }
     ensure!(!routes.is_empty(), "请先填写并保存自定义线路");
     Ok(routes)
@@ -392,16 +398,33 @@ pub fn probe_with(
     if !all.iter().any(|r| r.mode == RouteMode::Github) {
         all.push(Route::github());
     }
-    let mut samples: Vec<_> = std::thread::scope(|scope| {
-        let tasks: Vec<_> = all
-            .into_iter()
-            .map(|route| scope.spawn(move || probe_one(route, transport, public_key)))
+    // A user-maintained list must not create an unbounded number of network threads.
+    // Each route's deadline starts when a worker actually picks it up.
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let mut indexed = std::thread::scope(|scope| {
+        let tasks: Vec<_> = (0..all.len().min(MAX_PARALLEL_PROBES))
+            .map(|_| {
+                scope.spawn(|| {
+                    let mut results = Vec::new();
+                    loop {
+                        let index = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let Some(route) = all.get(index) else {
+                            break;
+                        };
+                        results.push((index, probe_one(route.clone(), transport, public_key)));
+                    }
+                    results
+                })
+            })
             .collect();
-        tasks
+        let batches = tasks
             .into_iter()
             .map(|task| task.join().map_err(|_| anyhow::anyhow!("线路检测任务异常")))
-            .collect::<Result<Vec<_>>>()
+            .collect::<Result<Vec<_>>>()?;
+        Ok::<_, anyhow::Error>(batches.into_iter().flatten().collect::<Vec<_>>())
     })?;
+    indexed.sort_by_key(|(index, _)| *index);
+    let mut samples: Vec<_> = indexed.into_iter().map(|(_, sample)| sample).collect();
     let trusted: Vec<_> = samples
         .iter()
         .filter(|s| s.trusted)

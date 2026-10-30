@@ -1044,6 +1044,10 @@ mod tests {
             cx.debug_bounds("prefs-route-status").is_some(),
             "route status list is visible"
         );
+        assert!(
+            cx.debug_bounds("prefs-add-route").is_some(),
+            "custom routes can be added without replacing a saved route"
+        );
     }
 
     #[gpui::test]
@@ -1153,6 +1157,15 @@ mod tests {
     fn preference_layout_keeps_controls_visible_at_minimum_window_size(cx: &mut TestAppContext) {
         let root = tempfile::tempdir().unwrap();
         setup(cx, root.path());
+        cx.update(|cx| {
+            for suffix in ["one", "two"] {
+                crate::updates::add_custom_route(
+                    &format!("https://long-mirror-name.example/long-prefix/{suffix}/"),
+                    cx,
+                )
+                .unwrap();
+            }
+        });
         let (view, cx) =
             cx.add_window_view(|window, cx| PreferencesView::new(Category::Appearance, window, cx));
         for dark in [false, true] {
@@ -1183,6 +1196,8 @@ mod tests {
                     let viewport = cx.debug_bounds("preferences-content").unwrap();
                     let route = cx.debug_bounds("prefs-update-route").unwrap();
                     assert!(route.left() >= viewport.left() && route.right() <= viewport.right());
+                    let remove = cx.debug_bounds("prefs-remove-route-1").unwrap();
+                    assert!(remove.left() >= viewport.left() && remove.right() <= viewport.right());
                     cx.simulate_event(ScrollWheelEvent {
                         position: viewport.center(),
                         delta: ScrollDelta::Pixels(point(px(0.0), px(-1000.0))),

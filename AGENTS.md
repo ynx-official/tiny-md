@@ -49,6 +49,8 @@
 
 ## 在线更新与发版
 
+- 用户于 2026-10-30 要求自定义线路支持逐条新增和移除，替代单地址设置。实现让自动模式检测全部保存线路，也可指定其中一条；移除指定线路后回到自动择优，兼容旧单地址配置并规范化去重。为限制网络任务数量，每轮最多同时检测四条。详见 `docs/02-design/update-routes.md`。
+
 - 用户于 2026-10-28 确认更新线路设计与页面效果图：每次检查前并行 HTTPS 探测，自动择优、手动重测、指定 / 自定义线路和失败切换；第三方清单使用 Ed25519 发布者签名，旧无签名清单须由 GitHub 直连核验。Windows / macOS 共用规则，详见 `docs/02-design/update-routes.md`；发版前配置签名 Secret，密钥与协议见 `docs/05-operations/update-signing.md`。
 
 - 更新实现位于 `crates/updater`，GPUI 交互位于 `crates/app/src/updates.rs`；参考 `D:/study/ashell` 的流程与 schema 1，独立实现并保留本项目许可证。

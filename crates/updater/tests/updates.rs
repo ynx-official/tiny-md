@@ -1,6 +1,60 @@
 use tiny_md_updater::{is_newer, parse_manifest};
 
 #[test]
+fn multiple_custom_routes_survive_restart_and_select_only_the_requested_route() {
+    use tiny_md_updater::{
+        Preferences,
+        routes::{RouteMode, configured_routes},
+    };
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("settings.json");
+    std::fs::write(&path, r#"{"route_mode":"auto","custom_routes":["https://mirror.example/one","https://mirror.example/two/"],"last_checked":123}"#).unwrap();
+    let mut prefs = Preferences::load(&path).unwrap();
+    let routes = configured_routes(&prefs).unwrap();
+    assert_eq!(
+        routes.len(),
+        5,
+        "all saved custom routes join automatic selection"
+    );
+    assert_ne!(
+        routes[3].label(),
+        routes[4].label(),
+        "paths on the same host remain distinguishable"
+    );
+    prefs.route_mode = RouteMode::Custom;
+    prefs.custom_route = "https://mirror.example/two/".into();
+    prefs.save(&path).unwrap();
+    let restored = Preferences::load(&path).unwrap();
+    let routes = configured_routes(&restored).unwrap();
+    assert_eq!(routes.len(), 1);
+    assert_eq!(routes[0].prefix, "https://mirror.example/two/");
+    let json = serde_json::to_value(restored).unwrap();
+    assert_eq!(json["custom_routes"].as_array().unwrap().len(), 2);
+    assert_eq!(json["last_checked"], 123);
+}
+
+#[test]
+fn legacy_single_custom_route_migrates_to_the_collection_without_changing_mode() {
+    for mode in ["auto", "custom"] {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("settings.json");
+        let value = serde_json::json!({"route_mode":mode,"custom_route":" https://mirror.example/proxy ","auto_download":true,"last_checked":42});
+        std::fs::write(&path, value.to_string()).unwrap();
+        let prefs = tiny_md_updater::Preferences::load(&path).unwrap();
+        prefs.save(&path).unwrap();
+        let json: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(
+            json["custom_routes"],
+            serde_json::json!(["https://mirror.example/proxy/"])
+        );
+        assert_eq!(json["route_mode"], mode);
+        assert_eq!(json["auto_download"], true);
+        assert_eq!(json["last_checked"], 42);
+    }
+}
+
+#[test]
 fn update_route_preferences_default_to_auto_and_survive_restart() {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("settings.json");

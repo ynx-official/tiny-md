@@ -2,6 +2,42 @@ use super::*;
 use ring::signature::{Ed25519KeyPair, KeyPair};
 use std::sync::{Barrier, Mutex};
 
+#[test]
+fn every_saved_custom_route_is_probed_with_bounded_concurrency() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    struct Measured {
+        active: AtomicUsize,
+        peak: AtomicUsize,
+    }
+    impl ProbeTransport for Measured {
+        fn get(&self, _: &Route, url: &str, _: Duration) -> Result<crate::HttpText> {
+            let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+            self.peak.fetch_max(active, Ordering::SeqCst);
+            std::thread::sleep(Duration::from_millis(15));
+            self.active.fetch_sub(1, Ordering::SeqCst);
+            Ok(crate::HttpText {
+                status: if url.ends_with(".sig") { 404 } else { 200 },
+                final_url: url.into(),
+                body: manifest("v1.0.0", &"ab".repeat(32)),
+            })
+        }
+    }
+    let transport = Measured {
+        active: AtomicUsize::new(0),
+        peak: AtomicUsize::new(0),
+    };
+    let prefs: Preferences = serde_json::from_value(serde_json::json!({
+        "custom_routes": (0..9).map(|n| format!("https://mirror.example/{n}/")).collect::<Vec<_>>()
+    }))
+    .unwrap();
+    let report = probe_with(&prefs, &transport, signing::PUBLIC_KEY).unwrap();
+    assert_eq!(report.entries.len(), 12);
+    assert_eq!(report.routes.len(), 12);
+    assert!((2..=4).contains(&transport.peak.load(Ordering::SeqCst)));
+    let prefixes: std::collections::HashSet<_> = report.routes.iter().map(|r| &r.prefix).collect();
+    assert_eq!(prefixes.len(), 12);
+}
+
 fn manifest(tag: &str, hash: &str) -> String {
     let name = format!("tiny-md-{tag}-windows-x64-setup.exe");
     serde_json::json!({"schema_version":1,"version":tag,"notes_url":asset_url(tag,"release-notes.md"),"assets":[{"name":name,"url":asset_url(tag,&name),"size":3,"digest":format!("sha256:{hash}")}]}).to_string()
