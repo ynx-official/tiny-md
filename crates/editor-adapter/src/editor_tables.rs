@@ -7,7 +7,8 @@ use gpui::{Point, WeakEntity, anchored, deferred};
 #[path = "editor_table_size.rs"]
 mod size;
 
-pub(super) const TOOLBAR_HEIGHT: f32 = 26.0;
+const TOOLBAR_HEIGHT: f32 = 28.0;
+const TOOLBAR_WIDTH: f32 = 166.0;
 
 #[derive(Clone)]
 struct Target {
@@ -469,23 +470,136 @@ impl MarkdownEditor {
         cx.notify();
     }
 
-    pub(super) fn table_toolbar(&self, cell: TableContext, cx: &Context<Self>) -> AnyElement {
+    pub(super) fn floating_table_toolbar(
+        &self,
+        cell: TableContext,
+        padding: f32,
+        window: &Window,
+        cx: &Context<Self>,
+    ) -> Option<AnyElement> {
+        let viewport = self.scroll.bounds().intersect(&Bounds::new(
+            point(px(0.0), px(0.0)),
+            window.viewport_size(),
+        ));
+        if viewport.size.width <= px(0.0) || viewport.size.height <= px(0.0) {
+            return None;
+        }
+        let origin = point(
+            viewport.left() + px(PAD_X),
+            viewport.top() + px(padding) + self.scroll.offset().y,
+        );
+        let first = self.layout.get(cell.start)?;
+        let last = self.layout.get(cell.end)?;
+        let top = origin.y + px(first.y.get());
+        let bottom = origin.y + px(last.y.get() + last.height);
+        if bottom <= viewport.top() || top >= viewport.bottom() {
+            return None;
+        }
+        let width = px(TOOLBAR_WIDTH).min(viewport.size.width);
+        let above = Bounds::new(
+            point(
+                (origin.x + px(self.wrap_w) - width).max(viewport.left()),
+                top - px(TOOLBAR_HEIGHT + 4.0),
+            ),
+            gpui::size(width, px(TOOLBAR_HEIGHT)),
+        );
+        // A normal separator can be shorter than the toolbar. Check the actual
+        // shaped text, including wrapping/alignment, before using that space.
+        let clear = above.top() >= viewport.top()
+            && self.layout[..cell.start]
+                .iter()
+                .rev()
+                .take_while(|row| origin.y + px(row.y.get() + row.height) > above.top())
+                .all(|row| {
+                    let row_top = origin.y + px(row.y.get());
+                    if row.height == 0.0 || row_top >= above.bottom() {
+                        return true;
+                    }
+                    if !row.cells.is_empty()
+                        || row.html_table.is_some()
+                        || row.text.is_none()
+                        || row.text.as_ref().is_some_and(|text| {
+                            row.height > row.pad_top + text.visual_rows() as f32 * row.line_h + 8.0
+                        })
+                    {
+                        return matches!(row.plan.kind, RowKind::Blank)
+                            || !above.intersects(&Bounds::new(
+                                point(origin.x, row_top),
+                                gpui::size(px(self.wrap_w), px(row.height)),
+                            ));
+                    }
+                    let text = row.text.as_ref().unwrap();
+                    (0..text.visual_rows()).all(|line| {
+                        let bounds = Bounds::new(
+                            point(
+                                origin.x + px(row.inset + row.align_offset(line)),
+                                row_top + px(row.pad_top + line as f32 * row.line_h - 2.0),
+                            ),
+                            gpui::size(px(text.visual_width(line) + 2.0), px(row.line_h + 4.0)),
+                        );
+                        !above.intersects(&bounds)
+                    })
+                });
+        let (bounds, vertical) = if clear {
+            (above, false)
+        } else {
+            // The gutter uses the editor's side padding, never changes column
+            // widths, and stays within the table so short tables cannot obscure
+            // the following paragraph. Its controls scroll if space is limited.
+            let y = top.max(viewport.top());
+            let height = (bottom.min(viewport.bottom()) - y).min(px(166.0));
+            let width =
+                px(PAD_X + first.cells.first().map_or(0.0, |cell| cell.row.inset)).min(px(28.0));
+            (
+                Bounds::new(
+                    point((origin.x - width - px(4.0)).max(viewport.left()), y),
+                    gpui::size(width, height),
+                ),
+                true,
+            )
+        };
+        Some(
+            div()
+                .child(deferred(
+                    anchored().position(bounds.origin).child(self.table_toolbar(
+                        cell,
+                        bounds.size,
+                        vertical,
+                        cx,
+                    )),
+                ))
+                .into_any_element(),
+        )
+    }
+
+    fn table_toolbar(
+        &self,
+        cell: TableContext,
+        size: gpui::Size<Pixels>,
+        vertical: bool,
+        cx: &Context<Self>,
+    ) -> AnyElement {
         let t = theme(cx);
         let text = t.dimmed().hsla();
         let hover = t.surface_hover().hsla();
         let selected = t.primary().alpha(0.12);
         let active = t.primary().hsla();
+        let button_size = if vertical {
+            f32::from(size.width) - 4.0
+        } else {
+            24.0
+        };
         let button = |id: &'static str, icon: IconName, label: &'static str| {
             div()
                 .id(id)
                 .debug_selector(move || id.into())
-                .size(px(24.0))
+                .size(px(button_size))
                 .flex()
                 .items_center()
                 .justify_center()
                 .rounded(px(4.0))
                 .cursor_pointer()
-                .text_size(px(14.0))
+                .text_size(px(button_size.min(14.0)))
                 .text_color(text)
                 .hover(move |style| style.bg(hover))
                 .tooltip(guise::overlay::tooltip(label))
@@ -495,14 +609,20 @@ impl MarkdownEditor {
                     cx.stop_propagation();
                 })
         };
-        let mut left = div().flex().items_center().gap(px(2.0)).child(
-            button("table-size-button", IconName::Grid2X2, "调整表格尺寸").on_click(cx.listener(
-                |this, event: &gpui::ClickEvent, window, cx| {
-                    this.open_table_popup(event.position(), true, window, cx);
-                    cx.stop_propagation();
-                },
-            )),
-        );
+        let mut left = div()
+            .flex()
+            .flex_shrink_0()
+            .items_center()
+            .gap(px(2.0))
+            .when(vertical, |el| el.flex_col())
+            .child(
+                button("table-size-button", IconName::Grid2X2, "调整表格尺寸").on_click(
+                    cx.listener(|this, event: &gpui::ClickEvent, window, cx| {
+                        this.open_table_popup(event.position(), true, window, cx);
+                        cx.stop_propagation();
+                    }),
+                ),
+            );
         for (id, icon, label, alignment) in [
             (
                 "table-align-left",
@@ -540,6 +660,8 @@ impl MarkdownEditor {
         }
         let right = div()
             .flex()
+            .flex_shrink_0()
+            .when(vertical, |el| el.flex_col())
             .items_center()
             .gap(px(2.0))
             .child(
@@ -573,19 +695,26 @@ impl MarkdownEditor {
         div()
             .id("table-toolbar")
             .debug_selector(|| "table-toolbar".into())
-            .absolute()
-            .top_0()
-            .left_0()
-            .right_0()
-            .h(px(TOOLBAR_HEIGHT))
+            .occlude()
+            .w(size.width)
+            .h(size.height)
+            .p(px(1.0))
+            .border_1()
+            .border_color(t.border().hsla())
+            .bg(t.surface().hsla())
+            .rounded(px(4.0))
+            .shadow_sm()
             .flex()
+            .gap(px(8.0))
+            .when(vertical, |el| el.flex_col().overflow_y_scroll())
             .items_center()
-            .justify_between()
+            .when(!vertical, |el| el.justify_between())
             .cursor_default()
             .on_mouse_down(MouseButton::Left, |_, window, cx| {
                 window.prevent_default();
                 cx.stop_propagation();
             })
+            .on_click(|_, _, cx| cx.stop_propagation())
             .child(left)
             .child(right)
             .into_any_element()

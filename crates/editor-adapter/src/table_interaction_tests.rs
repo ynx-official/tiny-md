@@ -5,6 +5,168 @@ const SOURCE: &str =
     "前文\n\n| 姓名 | 内容 |\n| --- | ---: |\n| 中文🌱 | `a\\|b` |\n| 第二行 | **粗体** |\n\n后文";
 
 #[gpui::test]
+fn floating_table_toolbar_keeps_reading_geometry_equal_to_readonly(cx: &mut TestAppContext) {
+    cx.update(|cx| guise::Theme::light().init(cx));
+    let (editor, cx) = cx.add_window_view(|window, cx| {
+        let editor = MarkdownEditor::new(cx).value(SOURCE).style(MarkdownStyle {
+            compact_blank_lines: true,
+            ..Default::default()
+        });
+        window.focus(&editor.focus);
+        editor
+    });
+    draw(cx);
+    let geometry = cx.read(|app| {
+        editor
+            .read(app)
+            .layout
+            .iter()
+            .map(|row| (row.y.get(), row.height))
+            .collect::<Vec<_>>()
+    });
+    editor.update(cx, |e, cx| e.set_read_only(true, cx));
+    draw(cx);
+    cx.read(|app| {
+        assert_eq!(
+            editor
+                .read(app)
+                .layout
+                .iter()
+                .map(|row| (row.y.get(), row.height))
+                .collect::<Vec<_>>(),
+            geometry,
+            "an editable table must not reserve space for a hidden toolbar"
+        );
+    });
+    editor.update(cx, |e, cx| {
+        e.set_read_only(false, cx);
+        tables::focus_cell(&mut e.model, 2, 0);
+        cx.notify();
+    });
+    draw(cx);
+    cx.read(|app| {
+        let e = editor.read(app);
+        assert_eq!(
+            e.layout
+                .iter()
+                .map(|row| (row.y.get(), row.height))
+                .collect::<Vec<_>>(),
+            geometry
+        );
+        assert_eq!(e.text(), SOURCE);
+    });
+    assert!(cx.debug_bounds("table-toolbar").is_some());
+}
+
+#[gpui::test]
+fn floating_table_toolbar_uses_clear_space_above_the_table(cx: &mut TestAppContext) {
+    cx.update(|cx| guise::Theme::light().init(cx));
+    let (editor, cx) = cx.add_window_view(|window, cx| {
+        let mut editor = MarkdownEditor::new(cx).value(SOURCE);
+        tables::focus_cell(&mut editor.model, 4, 1);
+        window.focus(&editor.focus);
+        editor
+    });
+    draw(cx);
+    let toolbar = cx.debug_bounds("table-toolbar").unwrap();
+    cx.read(|app| {
+        let e = editor.read(app);
+        let previous = &e.layout[0];
+        let text = gpui::Bounds::new(
+            e.text_bounds.origin,
+            size(
+                px(previous.text.as_ref().unwrap().visual_width(0)),
+                px(previous.line_h),
+            ),
+        );
+        assert!(!toolbar.intersects(&text));
+        assert!(toolbar.bottom() <= e.text_bounds.top() + px(e.layout[2].y.get()));
+        assert!(toolbar.size.width > toolbar.size.height);
+    });
+    click(cx, "table-more");
+    cx.read(|app| assert_eq!(editor.read(app).text(), SOURCE));
+    cx.simulate_keystrokes("escape");
+    draw(cx);
+}
+
+#[gpui::test]
+fn floating_table_toolbar_avoids_wrapped_prose_and_header_and_scrolls_short_tables(
+    cx: &mut TestAppContext,
+) {
+    cx.update(|cx| guise::Theme::dark().init(cx));
+    let source = format!(
+        "<p align=\"right\">{}</p>\n\n| 标题 | 内容 |\n| --- | --- |\n| 中文 | 内容 |\n\n后文",
+        "中".repeat(34)
+    );
+    let (editor, cx) = cx.add_window_view(|window, cx| {
+        let mut editor = MarkdownEditor::new(cx)
+            .value(&source)
+            .font_size(16.0)
+            .style(MarkdownStyle {
+                compact_blank_lines: true,
+                ..Default::default()
+            });
+        tables::focus_cell(&mut editor.model, 2, 0);
+        window.focus(&editor.focus);
+        editor
+    });
+    cx.simulate_resize(size(px(320.0), px(300.0)));
+    draw(cx);
+    let toolbar = cx.debug_bounds("table-toolbar").unwrap();
+    cx.read(|app| {
+        let e = editor.read(app);
+        let header = &e.layout[2];
+        assert!(
+            toolbar.right() <= e.text_bounds.left() + px(header.cells[0].row.inset),
+            "gutter controls must not cover header text: toolbar={toolbar:?}, text={:?}, inset={}",
+            e.text_bounds,
+            header.cells[0].row.inset
+        );
+        assert!(toolbar.top() >= e.text_bounds.top() + px(header.y.get()));
+        assert!(
+            toolbar.bottom() <= e.text_bounds.top() + px(e.layout[4].y.get() + e.layout[4].height)
+        );
+        assert!(toolbar.size.height > toolbar.size.width);
+    });
+    cx.simulate_mouse_move(toolbar.center(), None, gpui::Modifiers::none());
+    cx.simulate_event(gpui::ScrollWheelEvent {
+        position: toolbar.center(),
+        delta: gpui::ScrollDelta::Pixels(point(px(0.0), px(-200.0))),
+        ..Default::default()
+    });
+    draw(cx);
+    assert!(
+        toolbar.contains(&cx.debug_bounds("table-more").unwrap().center()),
+        "all controls remain reachable in a short table"
+    );
+    click(cx, "table-more");
+    cx.read(|app| {
+        assert!(editor.read(app).table_menu_open(app));
+        assert_eq!(editor.read(app).text(), source);
+    });
+    cx.simulate_keystrokes("escape");
+    draw(cx);
+    let header_position = cx.read(|app| {
+        let e = editor.read(app);
+        let row = &e.layout[2];
+        e.text_bounds.origin
+            + point(
+                px(row.cells[0].row.inset + 3.0),
+                px(row.y.get() + row.pad_top + row.line_h / 2.0),
+            )
+    });
+    cx.simulate_click(header_position, gpui::Modifiers::none());
+    draw(cx);
+    cx.read(|app| assert_eq!(editor.read(app).model.cursor().line, 2));
+    cx.simulate_input("测");
+    draw(cx);
+    cx.read(|app| assert!(editor.read(app).text().contains("测")));
+    cx.dispatch_action(actions::Undo);
+    draw(cx);
+    cx.read(|app| assert_eq!(editor.read(app).text(), source));
+}
+
+#[gpui::test]
 fn table_size_button_opens_without_changing_source_selection_or_layout(cx: &mut TestAppContext) {
     cx.update(|cx| guise::Theme::light().init(cx));
     let (editor, cx) = cx.add_window_view(|window, cx| {

@@ -2833,10 +2833,6 @@ impl MarkdownEditor {
                         .map(|cell| cell.row.height)
                         .fold(0.0, f32::max)
                         + 20.0;
-                    if i == table.start && !self.read_only {
-                        row.pad_top += editor_tables::TOOLBAR_HEIGHT;
-                        row.height += editor_tables::TOOLBAR_HEIGHT;
-                    }
                 }
             }
             row.height += image_height;
@@ -2972,16 +2968,11 @@ impl MarkdownEditor {
 
             if let Some(index) = table_membership[i] {
                 let table = &tables[index];
-                let toolbar_height = if i == table.start && !self.read_only {
-                    editor_tables::TOOLBAR_HEIGHT
-                } else {
-                    0.0
-                };
                 let mut grid = div()
                     .absolute()
                     .left_0()
                     .right_0()
-                    .top(px(toolbar_height))
+                    .top_0()
                     .bottom_0()
                     .border_l_1()
                     .border_r_1()
@@ -2996,18 +2987,13 @@ impl MarkdownEditor {
                     grid = grid.bg(table_edit_bg);
                 }
                 el = el.child(grid);
-                if i == table.start
-                    && let Some(cell) = active_table.filter(|cell| cell.start == i)
-                {
-                    el = el.child(self.table_toolbar(cell, cx));
-                }
                 for (column, cell) in row.cells.iter().enumerate() {
                     if column > 0 {
                         el = el.child(
                             div()
                                 .absolute()
                                 .left(px(cell.x))
-                                .top(px(toolbar_height))
+                                .top_0()
                                 .bottom_0()
                                 .w(px(1.0))
                                 .bg(rule_color),
@@ -3599,6 +3585,10 @@ impl MarkdownEditor {
             .on_key_down(cx.listener(Self::on_key))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_down(MouseButton::Right, cx.listener(Self::on_right_mouse_down))
+            .children(
+                active_table
+                    .and_then(|cell| self.floating_table_toolbar(cell, padding, window, cx)),
+            )
             .children(editmenu::slot(&self.menu))
             .children(
                 self.table_menu
