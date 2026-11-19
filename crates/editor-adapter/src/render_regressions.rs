@@ -515,8 +515,8 @@ fn html_details_hides_markdown_fences_and_single_line_body(cx: &mut TestAppConte
     draw(cx);
     cx.read(|cx| {
         let editor = editor.read(cx);
-        for line in 2..7 {
-            assert_eq!(editor.layout[line].height, 0.0, "line {line}");
+        for (line, row) in editor.layout.iter().enumerate().take(7).skip(2) {
+            assert_eq!(row.height, 0.0, "line {line}");
         }
         assert_eq!(editor.layout[8].plan.visible, "摘要");
     });
