@@ -1,7 +1,7 @@
 # 文档索引
 
 - 状态：Review
-- 最后更新：2026-11-02
+- 最后更新：2026-11-19
 - 关联文档：[项目说明](../README.md)
 
 | 文档 | 内容 |
@@ -18,7 +18,7 @@
 | [最近文件记录](02-design/recent-files.md) | 本地持久化、20 条去重排序、路径展示、清除及文件操作同步 |
 | [在线更新设计](03-architecture/online-updates.md) | 已确认的三级更新源、下载校验、安装重启与发布边界 |
 | [ELK 流程图布局](03-architecture/flowchart-elk-layout.md) | 原生 ELK 适配、分组与坐标、字体、回退及资源保护 |
-| [流程图阅读顺序](04-quality/flowchart-reading-order.md) | 多循环图主线顺序、外围回退线、分支引号与 Typora 截图对照 |
+| [流程图阅读顺序](04-quality/flowchart-reading-order.md) | 双入口与分支对齐、右侧回线、标签底色、正文预览与截图对照 |
 | [Mermaid 解析兼容性](04-quality/mermaid-parser-compatibility.md) | 大写 END、带标签链式连线、完整转交样例、错误保留与 35 图复用 |
 | [在线更新验证](04-quality/online-updates.md) | 更新与发布工具回归、真实下载检查、平台验收边界 |
 | [Windows 安装版更新修复](04-quality/windows-installed-update.md) | 旧版重开根因、路径兼容、安装版助手与失败恢复回归 |

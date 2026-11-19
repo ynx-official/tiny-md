@@ -51,6 +51,7 @@ fn elk_layout(
     seed.edges.clear();
     let mut layout = compute_layout(&seed, theme, config);
     let groups = layout.subgraphs.len();
+    let use_polylines = graph.subgraphs.is_empty();
     let parents = (0..groups)
         .map(|index| {
             let nodes = &layout.subgraphs[index].nodes;
@@ -84,6 +85,20 @@ fn elk_layout(
         .cloned()
         .collect::<Vec<_>>();
     nodes.sort_by_key(|id| graph.node_order.get(id).copied().unwrap_or(usize::MAX));
+    let flat_top_down = groups == 0 && graph.direction == Direction::TopDown;
+    let force_node_order = init
+        .and_then(|init| init.pointer("/elk/forceNodeModelOrder"))
+        .and_then(Value::as_bool);
+    let feedback_on_right = flat_top_down
+        && force_node_order != Some(false)
+        && nodes
+            .first()
+            .is_some_and(|entry| is_shared_feedback_entry(graph, entry));
+    if feedback_on_right {
+        // Rotation mirrors the transverse axis. Reverse the model order there
+        // to read branches left to right while keeping the original DFS entry.
+        nodes[1..].reverse();
+    }
     let ids = nodes
         .iter()
         .enumerate()
@@ -107,7 +122,8 @@ fn elk_layout(
         .collect::<HashMap<_, _>>();
     let mut options = json!({
         "elk.algorithm": "layered", "elk.direction": direction_name(graph.direction),
-        "elk.hierarchyHandling": "INCLUDE_CHILDREN", "elk.edgeRouting": "ORTHOGONAL",
+        "elk.hierarchyHandling": "INCLUDE_CHILDREN",
+        "elk.edgeRouting": if use_polylines { "POLYLINE" } else { "ORTHOGONAL" },
         // Follow directed paths from source nodes before breaking cycles. The
         // greedy default can reverse a main-process edge just because its end
         // has many outgoing branches, placing a late decision above the start.
@@ -120,6 +136,14 @@ fn elk_layout(
         "elk.padding": "[top=24,left=24,bottom=24,right=24]",
         "elk.randomSeed": 1
     });
+    if flat_top_down {
+        // Layer from the source so siblings are placed near their common parent
+        // even when one of their paths to a merge is shorter than the others.
+        options["elk.layered.layering.strategy"] = json!("LONGEST_PATH_SOURCE");
+    }
+    if feedback_on_right {
+        options["elk.layered.directionCongruency"] = json!("ROTATION");
+    }
     if let Some(strategy) = init
         .and_then(|init| init.pointer("/elk/nodePlacementStrategy"))
         .and_then(Value::as_str)
@@ -130,12 +154,8 @@ fn elk_layout(
     {
         options["elk.layered.nodePlacement.strategy"] = json!(strategy);
     }
-    if let Some(force) = init
-        .and_then(|init| init.pointer("/elk/forceNodeModelOrder"))
-        .and_then(Value::as_bool)
-    {
+    if let Some(force) = force_node_order.or(feedback_on_right.then_some(true)) {
         options["elk.layered.crossingMinimization.forceNodeModelOrder"] = json!(force);
-        options["elk.layered.considerModelOrder.strategy"] = json!("NODES_AND_EDGES");
     }
     let group_options = layout
         .subgraphs
@@ -217,7 +237,10 @@ fn elk_layout(
             if let Some(text) = text {
                 let block = &label_blocks[text];
                 labels.push(json!({"id": name, "text": text, "width": block.width + 8.0, "height": block.height + 8.0,
-                    "layoutOptions": {"elk.edgeLabels.placement": placement}}));
+                    "layoutOptions": {
+                        "elk.edgeLabels.placement": placement,
+                        "elk.edgeLabels.inline": use_polylines && name == "center"
+                    }}));
             }
         }
         let from = ids.get(&edge.from).ok_or("missing ELK source")?;
@@ -286,6 +309,31 @@ fn elk_layout(
     layout.width = number(&output, "width")?;
     layout.height = number(&output, "height")?;
     Ok(layout)
+}
+
+fn is_shared_feedback_entry(graph: &Graph, entry: &str) -> bool {
+    if !graph
+        .edges
+        .iter()
+        .any(|edge| edge.to == entry && edge.from != entry)
+    {
+        return false;
+    }
+    let mut successors = HashMap::<&str, Vec<&str>>::new();
+    for edge in &graph.edges {
+        successors.entry(&edge.from).or_default().push(&edge.to);
+    }
+    let mut visited = HashSet::new();
+    let mut pending = vec![entry];
+    while let Some(node) = pending.pop() {
+        if visited.insert(node)
+            && let Some(targets) = successors.get(node)
+        {
+            pending.extend(targets);
+        }
+    }
+    // A single entry still starts the same DFS after reversing the other nodes.
+    visited.len() == graph.nodes.len()
 }
 
 fn clip_endpoint(node: &mermaid_rs_renderer::layout::NodeLayout, point: (f32, f32)) -> (f32, f32) {
@@ -500,7 +548,132 @@ fn merge_edge_style(style: &mut EdgeStyleOverride, overrides: &EdgeStyleOverride
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mermaid_rs_renderer::parse_mermaid_strict;
+    use mermaid_rs_renderer::{layout::NodeLayout, parse_mermaid_strict};
+
+    fn crosses_node(segment: &[(f32, f32)], node: &NodeLayout) -> bool {
+        let [(x1, y1), (x2, y2)] = [segment[0], segment[1]];
+        let (mut enter, mut leave) = (0.0_f32, 1.0_f32);
+        for (start, end, min, max) in [
+            (x1, x2, node.x + 0.01, node.x + node.width - 0.01),
+            (y1, y2, node.y + 0.01, node.y + node.height - 0.01),
+        ] {
+            let delta = end - start;
+            if delta.abs() < 0.001 {
+                if start < min || start > max {
+                    return false;
+                }
+            } else {
+                let a = (min - start) / delta;
+                let b = (max - start) / delta;
+                enter = enter.max(a.min(b));
+                leave = leave.min(a.max(b));
+            }
+        }
+        enter < leave
+    }
+
+    #[test]
+    fn market_workflow_reads_top_to_bottom_and_left_to_right() {
+        let source = include_str!("../../../fixtures/diagrams/market-violation-workflow.mmd");
+        let parsed = crate::mermaid_parse::parse(source).unwrap();
+        let (output, backend) = layout(
+            &parsed.graph,
+            &Theme::modern(),
+            &LayoutConfig::default(),
+            None,
+        );
+        assert_eq!(backend, Backend::Elk);
+        assert_eq!(output.nodes.len(), 12);
+        assert_eq!(output.edges.len(), 15);
+        let x = |id: &str| output.nodes[id].x + output.nodes[id].width / 2.0;
+        let y = |id: &str| output.nodes[id].y;
+        for row in [
+            &["active", "passive"][..],
+            &["renew", "monitor", "complaint"][..],
+            &["marketClose", "legal"][..],
+            &["legalClose", "action"][..],
+        ] {
+            for pair in row.windows(2) {
+                assert!(
+                    (y(pair[0]) - y(pair[1])).abs() < 0.1,
+                    "{pair:?} are on different rows"
+                );
+                assert!(x(pair[0]) < x(pair[1]), "{pair:?} are out of order");
+            }
+        }
+        for pair in [
+            "entry",
+            "active",
+            "renew",
+            "investigate",
+            "market",
+            "legal",
+            "action",
+        ]
+        .windows(2)
+        {
+            assert!(y(pair[0]) < y(pair[1]), "{pair:?} are out of order");
+        }
+        for (from, to) in [
+            ("entry", "active"),
+            ("renew", "investigate"),
+            ("complaint", "investigate"),
+            ("market", "legal"),
+        ] {
+            let edge = output
+                .edges
+                .iter()
+                .find(|edge| edge.from == from && edge.to == to)
+                .unwrap();
+            assert!(
+                edge.points.windows(2).any(|segment| {
+                    let [(x1, y1), (x2, y2)] = [segment[0], segment[1]];
+                    (x1 - x2).abs() > 10.0 && (y1 - y2).abs() > 10.0
+                }),
+                "{from} -> {to} has no diagonal segment"
+            );
+        }
+        let right = output
+            .nodes
+            .values()
+            .map(|node| node.x + node.width)
+            .fold(0.0, f32::max);
+        let feedback = output
+            .edges
+            .iter()
+            .filter(|edge| edge.to == "entry")
+            .collect::<Vec<_>>();
+        assert_eq!(feedback.len(), 2);
+        let lane = |edge: &EdgeLayout| {
+            edge.points
+                .windows(2)
+                .find_map(|segment| {
+                    let [(x1, y1), (x2, y2)] = [segment[0], segment[1]];
+                    (x1 > right && (x1 - x2).abs() < 0.1 && (y1 - y2).abs() > 250.0).then_some(x1)
+                })
+                .unwrap_or_else(|| {
+                    panic!("{} has no clearance to the right of the flow", edge.from)
+                })
+        };
+        assert!((lane(feedback[0]) - lane(feedback[1])).abs() > 6.0);
+        for edge in &output.edges {
+            for node in output
+                .nodes
+                .values()
+                .filter(|node| node.id != edge.from && node.id != edge.to)
+            {
+                assert!(
+                    edge.points
+                        .windows(2)
+                        .all(|segment| !crosses_node(segment, node)),
+                    "{} -> {} crosses {}",
+                    edge.from,
+                    edge.to,
+                    node.id
+                );
+            }
+        }
+    }
 
     #[test]
     fn project_gates_keep_the_forward_process_in_reading_order() {
@@ -551,19 +724,8 @@ mod tests {
                             if node.id == edge.from || node.id == edge.to {
                                 continue;
                             }
-                            let [(x1, y1), (x2, y2)] = [segment[0], segment[1]];
-                            let crosses_vertical = (x1 - x2).abs() < 0.01
-                                && x1 > node.x + 0.01
-                                && x1 < node.x + node.width - 0.01
-                                && y1.max(y2) > node.y + 0.01
-                                && y1.min(y2) < node.y + node.height - 0.01;
-                            let crosses_horizontal = (y1 - y2).abs() < 0.01
-                                && y1 > node.y + 0.01
-                                && y1 < node.y + node.height - 0.01
-                                && x1.max(x2) > node.x + 0.01
-                                && x1.min(x2) < node.x + node.width - 0.01;
                             assert!(
-                                !crosses_vertical && !crosses_horizontal,
+                                !crosses_node(segment, node),
                                 "{direction}: feedback {} -> {} crosses {}",
                                 edge.from,
                                 edge.to,

@@ -3032,15 +3032,21 @@ impl MarkdownEditor {
                 }
             }
 
+            let collapsed_diagram =
+                membership[i].is_some_and(|index| blocks[index].is_mermaid() && !expanded[index]);
             if let Some(index) = membership[i] {
                 let block = &blocks[index];
-                el = el
-                    .bg(code_bg)
-                    .border_l_1()
-                    .border_r_1()
-                    .border_color(rule_color);
+                if !collapsed_diagram {
+                    el = el
+                        .bg(code_bg)
+                        .border_l_1()
+                        .border_r_1()
+                        .border_color(rule_color);
+                }
                 if i == block.start {
-                    el = el.rounded_t(px(8.0)).border_t_1();
+                    if !collapsed_diagram {
+                        el = el.rounded_t(px(8.0)).border_t_1();
+                    }
                     let label = if block.language.is_empty() {
                         "CODE".to_owned()
                     } else {
@@ -3109,12 +3115,16 @@ impl MarkdownEditor {
                             .px(px(14.0))
                             .flex()
                             .items_center()
-                            .justify_between()
-                            .border_b_1()
-                            .border_color(rule_color)
+                            .when(collapsed_diagram, |toolbar| toolbar.justify_end())
+                            .when(!collapsed_diagram, |toolbar| {
+                                toolbar
+                                    .justify_between()
+                                    .border_b_1()
+                                    .border_color(rule_color)
+                                    .child(label)
+                            })
                             .text_size(px(11.0))
                             .text_color(dimmed)
-                            .child(label)
                             .child(
                                 div()
                                     .flex()
@@ -3178,7 +3188,7 @@ impl MarkdownEditor {
                             ),
                     );
                 }
-                if i == block.end || (block.is_mermaid() && !expanded[index]) {
+                if !collapsed_diagram && i == block.end {
                     el = el.rounded_b(px(8.0)).border_b_1();
                 }
                 if block.is_mermaid()
@@ -3307,7 +3317,7 @@ impl MarkdownEditor {
 
             match &row.plan.kind {
                 RowKind::Code { .. } => el = el.bg(code_bg),
-                RowKind::Fence { open } => {
+                RowKind::Fence { open } if !collapsed_diagram => {
                     el = el.bg(code_bg);
                     el = if *open {
                         el.rounded_t(px(radius))

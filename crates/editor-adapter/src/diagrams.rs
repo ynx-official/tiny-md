@@ -5,8 +5,13 @@ use gpui::{
     App, AppContext, Div, Entity, Hsla, Image, ImageFormat, ScrollHandle, Task, div, point,
     prelude::*, px,
 };
-use mermaid_rs_renderer::{LayoutConfig, Theme, measure_svg_dimensions};
-use std::sync::Arc;
+use mermaid_rs_renderer::{
+    DiagramKind, LayoutConfig, Theme, ir::EdgeStyle, layout::EdgeLayout, measure_svg_dimensions,
+};
+use std::{
+    fmt::Write,
+    sync::{Arc, LazyLock},
+};
 
 #[derive(Clone, Hash, PartialEq, Eq)]
 pub struct DiagramKey {
@@ -289,9 +294,8 @@ pub fn render(key: &DiagramKey) -> Result<Diagram, String> {
         return Err("流程图源码过长，请拆分为多个图。".into());
     }
     let parsed = parse(&key.source)?;
-    if parsed.graph.kind == mermaid_rs_renderer::DiagramKind::Flowchart
-        && parsed.graph.nodes.is_empty()
-    {
+    let flowchart = parsed.graph.kind == DiagramKind::Flowchart;
+    if flowchart && parsed.graph.nodes.is_empty() {
         return Err("未找到有效节点，请检查节点括号和连接语法。".into());
     }
     if parsed.graph.nodes.len() > 200 {
@@ -312,7 +316,12 @@ pub fn render(key: &DiagramKey) -> Result<Diagram, String> {
     .into();
     theme.font_size = 16.0;
     theme.background = "transparent".into();
-    theme.edge_label_background = "transparent".into();
+    theme.edge_label_background = match (flowchart, key.dark) {
+        (true, true) => "#30312F",
+        (true, false) => "#F6F5F4",
+        (false, _) => "transparent",
+    }
+    .into();
     if key.dark {
         theme.primary_color = "#293C32".into();
         theme.secondary_color = "#31453B".into();
@@ -327,8 +336,15 @@ pub fn render(key: &DiagramKey) -> Result<Diagram, String> {
         theme.line_color = "#617F70".into();
     }
     let config = LayoutConfig::default();
-    let (layout, backend) =
+    let (mut layout, backend) =
         crate::diagram_layout::layout(&parsed.graph, &theme, &config, parsed.init_config.as_ref());
+    if flowchart {
+        for edge in &mut layout.edges {
+            if edge.style != EdgeStyle::Thick {
+                edge.override_style.stroke_width.get_or_insert(1.5);
+            }
+        }
+    }
     let dimensions = measure_svg_dimensions(&layout, &config, None);
     if !dimensions.width.is_finite()
         || !dimensions.height.is_finite()
@@ -348,6 +364,12 @@ pub fn render(key: &DiagramKey) -> Result<Diagram, String> {
         &config,
         Some((dimensions.width, dimensions.height)),
     );
+    let svg = if backend == crate::diagram_layout::Backend::Elk && parsed.graph.subgraphs.is_empty()
+    {
+        draw_straight_segments(svg, &layout.edges)
+    } else {
+        svg
+    };
     // The marker is diagnostic metadata; it never appears in the editor UI.
     let svg = svg.replacen("<svg ", &format!("<svg data-layout=\"{backend:?}\" "), 1);
     Ok(Diagram {
@@ -357,9 +379,69 @@ pub fn render(key: &DiagramKey) -> Result<Diagram, String> {
     })
 }
 
+fn draw_straight_segments(svg: String, edges: &[EdgeLayout]) -> String {
+    // The renderer rounds flowchart path corners unconditionally. Replace only
+    // the generated edge path coordinates so its labels and markers stay intact.
+    static EDGE_PATH: LazyLock<regex::Regex> = LazyLock::new(|| {
+        regex::Regex::new(
+            r#"(<path id="edge-([0-9]+)" class="edgePath" data-edge-id="edge-[0-9]+" d=")[^"]*"#,
+        )
+        .unwrap()
+    });
+    match EDGE_PATH.replace_all(&svg, |captures: &regex::Captures<'_>| {
+        let Some(edge) = captures[2]
+            .parse::<usize>()
+            .ok()
+            .and_then(|index| edges.get(index))
+        else {
+            return captures[0].to_owned();
+        };
+        let mut path = captures[1].to_owned();
+        for (index, (x, y)) in edge.points.iter().enumerate() {
+            let command = if index == 0 { "M" } else { " L" };
+            write!(path, "{command} {x:.3},{y:.3}").expect("writing to a String cannot fail");
+        }
+        path
+    }) {
+        std::borrow::Cow::Borrowed(_) => svg,
+        std::borrow::Cow::Owned(svg) => svg,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn market_workflow_uses_legible_flowchart_labels_in_both_themes() {
+        let source = include_str!("../../../fixtures/diagrams/market-violation-workflow.mmd");
+        for dark in [false, true] {
+            let diagram = render(&DiagramKey {
+                source: source.into(),
+                dark,
+            })
+            .unwrap();
+            let svg = std::str::from_utf8(diagram.image.bytes()).unwrap();
+            let mut label_boxes = svg.split('<').filter(|element| {
+                element.starts_with("rect data-edge-id=") && element.contains("data-label-kind=")
+            });
+            assert_eq!(label_boxes.clone().count(), 8);
+            let label_fill = if dark { "#30312F" } else { "#F6F5F4" };
+            assert!(
+                label_boxes
+                    .clone()
+                    .any(|element| element.contains("fill-opacity=\"0.95\""))
+            );
+            assert!(label_boxes.all(|element| element.contains(label_fill)));
+            let mut paths = svg.split('<').filter(|element| {
+                element.starts_with("path ") && element.contains("data-edge-id=")
+            });
+            assert_eq!(paths.clone().count(), 15);
+            assert!(paths.all(
+                |element| element.contains("stroke-width=\"1.5\"") && !element.contains(" Q ")
+            ));
+        }
+    }
 
     #[test]
     fn task_transfer_flowchart_with_uppercase_end_and_line_breaks_renders() {

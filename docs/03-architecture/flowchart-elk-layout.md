@@ -1,7 +1,7 @@
 # 原生 ELK 流程图布局
 
 - 状态：Review
-- 最后更新：2026-10-14
+- 最后更新：2026-11-19
 - 关联文档：[加载性能](../04-quality/diagram-load-performance.md)、[缓存与调度](../04-quality/diagram-memory-and-viewer.md)、[UI 风格](../02-design/ui-style.md)
 
 ## 范围与选择
@@ -29,7 +29,7 @@ ELK 返回错误、panic 或不完整 / 非有限几何时回退原生布局，�
 先从解析图移除连线，调用既有布局器取得文字换行、节点尺寸、形状、样式、链接和分组标题。
 这避免执行旧布局器最昂贵的连线路由和标签避让；边标签另按唯一文本测量一次。
 
-ELK 接收有尺寸的节点、分组层次及正交连线。内部 ID 独立生成，源码 ID 只参与映射，
+ELK 接收有尺寸的节点、分组层次及连线。内部 ID 独立生成，源码 ID 只参与映射，
 同一进程的每个计算任务拥有自己的引擎实例，不引入串行引擎锁。
 输入仅为 JSON 数据，不执行源码中的脚本或外部命令。
 
@@ -55,13 +55,20 @@ ELK 接收有尺寸的节点、分组层次及正交连线。内部 ID 独立生
 
 开启 `elk.layered.feedbackEdges`，使回退边绕过节点；
 设置 `elk.layered.considerModelOrder.strategy = NODES_AND_EDGES`，在减少交叉的约束下参考源码顺序。
-不强制锁定每一层的节点顺序，仍允许 ELK 优化分支与交叉；显式 `forceNodeModelOrder` 配置保留。
-适配仍使用正交连线、原有字体与主题，不要求与 Typora 的坐标或折线逐像素一致。
+未分组的自上而下流程图从入口向下分层，较短路径的同级分支也尽量留在共同上游节点附近。
+若首个声明的节点可到达整张图且有非自环的回边，调整横向布局方向并固定同层的源码节点顺序。
+这让分支从左到右排列，回线优先放在右侧外围。深度优先遍历仍从同一入口开始。
+其他图继续允许 ELK 调整同层节点以减少交叉。显式 `forceNodeModelOrder: false` 保留此行为。
+未分组流程图使用 ELK 折线路由，分叉和汇合可以斜向连接，中央标签预留在线上，标签底色盖住下方的线。
+SVG 直接绘制 ELK 的线段与折点，沿用既有节点形状、箭头、端点裁剪及线条样式。
+带子图的流程图仍用正交路由。图内连线与正文预览的呈现见[流程图阅读顺序](../04-quality/flowchart-reading-order.md)。
 遍历顺序是布局启发式，复杂图中存在多条可选主路径时不宣称能够推断作者的业务优先级。
 方案、完整样例与验证见[流程图阅读顺序](../04-quality/flowchart-reading-order.md)。
-配置含义参考 [ELK 环路策略](https://eclipse.dev/elk/reference/options/org-eclipse-elk-layered-cycleBreaking-strategy.html)、
+配置含义参考 [ELK 节点分层策略](https://eclipse.dev/elk/reference/options/org-eclipse-elk-layered-layering-strategy.html)、
+[环路策略](https://eclipse.dev/elk/reference/options/org-eclipse-elk-layered-cycleBreaking-strategy.html)、
 [回退边](https://eclipse.dev/elk/reference/options/org-eclipse-elk-layered-feedbackEdges.html)和
 [模型顺序](https://eclipse.dev/elk/reference/options/org-eclipse-elk-layered-considerModelOrder-strategy.html)。
+折线路由见 [ELK 连线路由](https://eclipse.dev/elk/reference/options/org-eclipse-elk-edgeRouting.html)。
 
 ## 性能与资源
 

@@ -1,0 +1,16 @@
+flowchart TD
+    entry["预警入口"] --> active["主动发现"]
+    entry --> passive["被动发现"]
+    active --> renew["续费组调查到期未续费原因"]
+    active --> monitor["数据监测组核对预警指标"]
+    passive --> complaint["客服部或市场部收到投诉"]
+    renew -->|发现相关线索| investigate["市场部调查与取证"]
+    monitor -->|命中指标| investigate
+    complaint --> investigate
+    investigate --> market{"市场中心判断并建议处置方式"}
+    market -->|驳回，需补充信息| entry
+    market -->|投诉不成立| marketClose["流程结束"]
+    market -->|投诉成立| legal{"法务部审核"}
+    legal -->|驳回，需补充信息| entry
+    legal -->|投诉不成立| legalClose["流程结束"]
+    legal -->|投诉成立| action["市场部发起冻结佣金及整改函流程（接下图）"]
