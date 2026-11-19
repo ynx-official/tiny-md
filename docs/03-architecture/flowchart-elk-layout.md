@@ -61,6 +61,9 @@ ELK 接收有尺寸的节点、分组层次及连线。内部 ID 独立生成，
 其他图继续允许 ELK 调整同层节点以减少交叉。显式 `forceNodeModelOrder: false` 保留此行为。
 未分组流程图使用 ELK 折线路由，分叉和汇合可以斜向连接，中央标签预留在线上，标签底色盖住下方的线。
 SVG 直接绘制 ELK 的线段与折点，沿用既有节点形状、箭头、端点裁剪及线条样式。
+共享入口已有独立右侧回线通道时，适配尝试将返回路径缩为三段，分别接入入口右侧的不同位置。
+中央标签移到靠近起始节点的斜线段。如果整组新路线会穿过节点、其他连线或标签，继续使用 ELK 原来的路线。
+较长的纯文本宽字符决策节点使用两行排版，选取接近视觉中点的合法断点。源文件和作者指定的换行继续原样使用。
 带子图的流程图仍用正交路由。图内连线与正文预览的呈现见[流程图阅读顺序](../04-quality/flowchart-reading-order.md)。
 遍历顺序是布局启发式，复杂图中存在多条可选主路径时不宣称能够推断作者的业务优先级。
 方案、完整样例与验证见[流程图阅读顺序](../04-quality/flowchart-reading-order.md)。
@@ -69,6 +72,7 @@ SVG 直接绘制 ELK 的线段与折点，沿用既有节点形状、箭头、�
 [回退边](https://eclipse.dev/elk/reference/options/org-eclipse-elk-layered-feedbackEdges.html)和
 [模型顺序](https://eclipse.dev/elk/reference/options/org-eclipse-elk-layered-considerModelOrder-strategy.html)。
 折线路由见 [ELK 连线路由](https://eclipse.dev/elk/reference/options/org-eclipse-elk-edgeRouting.html)。
+标签断点参考 [Unicode 换行规则](https://www.unicode.org/reports/tr14/)。
 
 ## 性能与资源
 

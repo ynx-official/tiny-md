@@ -2,10 +2,13 @@
 use mermaid_rs_renderer::{
     DiagramKind, LayoutConfig, Theme, compute_layout,
     ir::{Direction, EdgeStyleOverride, Graph, Node, NodeShape},
-    layout::{EdgeLayout, Layout, TextBlock},
+    layout::{EdgeLayout, Layout, NodeLayout, TextBlock},
 };
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+
+mod feedback;
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Backend {
@@ -49,6 +52,15 @@ fn elk_layout(
     // and group headers, so adopting ELK does not invent another text measurer.
     let mut seed = graph.clone();
     seed.edges.clear();
+    for node in seed
+        .nodes
+        .values_mut()
+        .filter(|node| node.shape == NodeShape::Diamond)
+    {
+        if let Some(offset) = decision_label_break(&node.label) {
+            node.label.insert(offset, '\n');
+        }
+    }
     let mut layout = compute_layout(&seed, theme, config);
     let groups = layout.subgraphs.len();
     let use_polylines = graph.subgraphs.is_empty();
@@ -308,7 +320,33 @@ fn elk_layout(
     }
     layout.width = number(&output, "width")?;
     layout.height = number(&output, "height")?;
+    if use_polylines && feedback_on_right {
+        feedback::straighten_feedback_routes(&mut layout, &nodes[0]);
+    }
     Ok(layout)
+}
+
+fn decision_label_break(label: &str) -> Option<usize> {
+    let width = label.width();
+    // Apply the balanced break only to plain labels with wide characters.
+    // Explicit line breaks, markup, and proportional Latin text keep their existing layout.
+    if width <= 24
+        || label.contains(['\n', '\r', '\\', '<', '>', '&', '`', '*', '_', '$'])
+        || !label.chars().any(|ch| ch.width() == Some(2))
+    {
+        return None;
+    }
+    let mut previous = 0;
+    let mut left = 0;
+    unicode_linebreak::linebreaks(label)
+        .take_while(|&(offset, _)| offset < label.len())
+        .map(|(offset, _)| {
+            left += label[previous..offset].width();
+            previous = offset;
+            (offset, width.abs_diff(left * 2))
+        })
+        .min_by_key(|&(_, imbalance)| imbalance)
+        .map(|(offset, _)| offset)
 }
 
 fn is_shared_feedback_entry(graph: &Graph, entry: &str) -> bool {
@@ -336,7 +374,7 @@ fn is_shared_feedback_entry(graph: &Graph, entry: &str) -> bool {
     visited.len() == graph.nodes.len()
 }
 
-fn clip_endpoint(node: &mermaid_rs_renderer::layout::NodeLayout, point: (f32, f32)) -> (f32, f32) {
+fn clip_endpoint(node: &NodeLayout, point: (f32, f32)) -> (f32, f32) {
     // ELK routes to bounding rectangles. Project only the terminal point onto
     // the painted convex outline so multi-port arrows do not float beside a
     // diamond, circle, rounded box or database cylinder.
@@ -548,28 +586,16 @@ fn merge_edge_style(style: &mut EdgeStyleOverride, overrides: &EdgeStyleOverride
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mermaid_rs_renderer::{layout::NodeLayout, parse_mermaid_strict};
+    use mermaid_rs_renderer::parse_mermaid_strict;
 
     fn crosses_node(segment: &[(f32, f32)], node: &NodeLayout) -> bool {
-        let [(x1, y1), (x2, y2)] = [segment[0], segment[1]];
-        let (mut enter, mut leave) = (0.0_f32, 1.0_f32);
-        for (start, end, min, max) in [
-            (x1, x2, node.x + 0.01, node.x + node.width - 0.01),
-            (y1, y2, node.y + 0.01, node.y + node.height - 0.01),
-        ] {
-            let delta = end - start;
-            if delta.abs() < 0.001 {
-                if start < min || start > max {
-                    return false;
-                }
-            } else {
-                let a = (min - start) / delta;
-                let b = (max - start) / delta;
-                enter = enter.max(a.min(b));
-                leave = leave.min(a.max(b));
-            }
-        }
-        enter < leave
+        feedback::crosses_bounds(
+            segment,
+            [
+                (node.x + 0.01, node.y + 0.01),
+                (node.x + node.width - 0.01, node.y + node.height - 0.01),
+            ],
+        )
     }
 
     #[test]
@@ -656,6 +682,30 @@ mod tests {
                 })
         };
         assert!((lane(feedback[0]) - lane(feedback[1])).abs() > 6.0);
+        let ports = [
+            feedback[0].points.last().unwrap(),
+            feedback[1].points.last().unwrap(),
+        ];
+        assert!((ports[0].1 - ports[1].1).abs() > 8.0);
+        let market = &output.nodes["market"];
+        assert_eq!(market.label.lines, ["市场中心判断", "并建议处置方式"]);
+        assert!(
+            market.height < 200.0,
+            "decision is {:.0} px tall",
+            market.height
+        );
+        let entry = &output.nodes["entry"];
+        for edge in feedback {
+            let [start, outward, upward, end] = edge.points[..] else {
+                panic!("{} needs two bends to reach the entry", edge.from);
+            };
+            assert!((outward.0 - upward.0).abs() < 0.1 && outward.1 > upward.1);
+            assert!((end.0 - (entry.x + entry.width)).abs() < 0.1);
+            assert!(end.1 > entry.y && end.1 < entry.y + entry.height);
+            let anchor = edge.label_anchor.unwrap();
+            assert!(anchor.0 > start.0 && anchor.0 < outward.0);
+            assert!(anchor.1 >= start.1 && anchor.1 <= outward.1);
+        }
         for edge in &output.edges {
             for node in output
                 .nodes
@@ -673,6 +723,18 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn decision_label_break_respects_punctuation_and_manual_wrapping() {
+        let label = "市场中心判断决定，安排处置方式";
+        let offset = decision_label_break(label).unwrap();
+        assert!(!label[offset..].starts_with('，'));
+        assert_eq!(
+            decision_label_break("市场中心判断<br/>并建议处置方式"),
+            None
+        );
+        assert_eq!(decision_label_break("法务部审核"), None);
     }
 
     #[test]

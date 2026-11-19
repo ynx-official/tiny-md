@@ -50,6 +50,7 @@
 | [v0.2.16 版本详情](06-delivery/versions/v0.2.16.md) | 正文宽度、字体、字号、行高和段落间距偏好 |
 | [v0.2.17 版本详情](06-delivery/versions/v0.2.17.md) | 更新线路自动择优、手动测速、固定/自定义线路与签名清单 |
 | [v0.2.18 版本详情](06-delivery/versions/v0.2.18.md) | 多条自定义更新线路管理与不挤动正文的表格悬浮工具栏 |
+| [v0.2.19 版本详情](06-delivery/versions/v0.2.19.md) | Mermaid 流程图分支阅读顺序、斜向连线、共享入口回线和中文标签布局优化 |
 | [v0.2.12 未发布记录](99-archive/v0.2.12-failed-release.md) | Clippy 检查失败与补丁版本替代 |
 | [v0.2.8 未发布记录](99-archive/v0.2.8-failed-release.md) | CI Clippy 失败、未公开 Release 与替代版本 |
 | [v0.2.7 版本详情](06-delivery/versions/v0.2.7.md) | 双平台段落空行修复与本次跳过测试的发布记录 |
